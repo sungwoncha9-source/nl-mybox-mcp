@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 'use strict';
-// 노드랩 파일 이동기 MCP — PC에서 실행. 도구 3개: file_stat, send_file, receive_file
+// 노드랩 파일 이동기 MCP v1.1 — PC에서 실행. 도구 4개: file_stat, send_file, receive_file, delete_path
+// 변경점(v1.0 대비): delete_path 추가(기본은 휴지통 폴더로 이동, permanent:true일 때만 영구 삭제). 나머지 3개 도구는 동작 그대로.
 // 의존성 없음(Node 18+). 클로드는 "주소(URL)와 PC 경로"만 말하고, 파일 바이트는 이 프로그램이 직접 옮긴다.
 const fs = require('fs');
 const path = require('path');
@@ -10,11 +11,22 @@ const net = require('net');
 const DEFAULT_HOSTS = ['figma.com', 'figma-alpha-api.s3.us-west-2.amazonaws.com', 'amazonaws.com',
   'adobe.io', 'adobe.com', 'adobelogin.com', 'cloudfront.net', 'behance.net'];
 
+const TRASH_NAME = '_trash';
+
 function makeConfig(env = process.env) {
   const dirs = (env.MOVER_ALLOWED_DIRS || (process.platform === 'win32' ? 'D:\\nodelab_work' : process.cwd()))
     .split(path.delimiter === ';' ? ';' : /[;:]/).map(s => s.trim()).filter(Boolean);
+  const realDirs = dirs.map(d => { try { return fs.realpathSync(d); } catch { return path.resolve(d); } });
+  // 보호 경로: 감시 프로그램(agent)과 이동기 자신(file-mover)은 지우지 못한다. 추가는 MOVER_PROTECTED(;구분, 허용 폴더 기준 상대 또는 절대경로)
+  const extra = (env.MOVER_PROTECTED || '').split(';').map(s => s.trim()).filter(Boolean);
+  const prot = [];
+  for (const d of realDirs) {
+    prot.push(path.join(d, 'agent'), path.join(d, 'file-mover'), path.join(d, TRASH_NAME));
+    for (const e of extra) prot.push(path.isAbsolute(e) ? path.resolve(e) : path.join(d, e));
+  }
   return {
-    dirs: dirs.map(d => { try { return fs.realpathSync(d); } catch { return path.resolve(d); } }),
+    dirs: realDirs,
+    protectedPaths: prot,
     hosts: (env.MOVER_ALLOWED_HOSTS ? env.MOVER_ALLOWED_HOSTS.split(',') : DEFAULT_HOSTS).map(s => s.trim().toLowerCase()).filter(Boolean),
     maxBytes: Number(env.MOVER_MAX_BYTES || 104857600), // 100MB
     allowHttp: env.MOVER_ALLOW_HTTP === '1',       // 시험용
@@ -154,6 +166,52 @@ async function receiveFile(a, cfg) {
   return { saved_path: target, bytes: n, content_type: ctype };
 }
 
+// ---------- 삭제 (v1.1 추가) ----------
+const stamp = () => { const d = new Date(), z = n => String(n).padStart(2, '0');
+  return d.getFullYear() + z(d.getMonth() + 1) + z(d.getDate()) + '-' + z(d.getHours()) + z(d.getMinutes()) + z(d.getSeconds()); };
+function rootOf(real, cfg) { return cfg.dirs.find(d => { const a = norm(real), b = norm(d); return a === b || a.startsWith(b + path.sep); }); }
+function dirSize(p) { let n = 0; for (const e of fs.readdirSync(p, { withFileTypes: true })) { const q = path.join(p, e.name);
+  try { n += e.isDirectory() ? dirSize(q) : fs.lstatSync(q).size; } catch {} } return n; }
+function countEntries(p) { let n = 0; for (const e of fs.readdirSync(p, { withFileTypes: true })) { n++; if (e.isDirectory()) n += countEntries(path.join(p, e.name)); } return n; }
+
+async function deletePath(a, cfg) {
+  if (!a || !a.path) throw new Error('path가 필요합니다');
+  const real = insideAllowed(a.path, cfg);
+  const root = rootOf(real, cfg);
+  if (norm(real) === norm(root)) throw new Error('허용 루트 폴더 자체는 지울 수 없습니다: ' + real);
+  for (const p of cfg.protectedPaths) {
+    const r = norm(real), q = norm(p);
+    const isTrash = path.basename(p) === TRASH_NAME;
+    if (r === q) throw new Error('보호된 경로입니다: ' + p);
+    if (r.startsWith(q + path.sep) && !isTrash) throw new Error('보호된 경로 안입니다: ' + p); // 휴지통 안의 항목은 지울 수 있다
+    if (q.startsWith(r + path.sep)) throw new Error('보호된 경로를 포함하고 있어 지울 수 없습니다: ' + p);
+  }
+  if (!fs.existsSync(real)) throw new Error('없는 경로입니다: ' + real);
+  const st = fs.lstatSync(real);
+  const isDir = st.isDirectory();
+  const recurse = a.recurse === true;
+  if (isDir && !recurse && fs.readdirSync(real).length > 0) throw new Error('비어 있지 않은 폴더입니다. 폴더째 지우려면 recurse:true가 필요합니다');
+  const trashDir = path.join(root, TRASH_NAME);
+  const inTrash = norm(real).startsWith(norm(trashDir) + path.sep);
+  const permanent = a.permanent === true || inTrash; // 휴지통 안의 것은 다시 휴지통으로 보낼 수 없으므로 영구 삭제
+  const info = { kind: isDir ? 'folder' : 'file', from: real, bytes: isDir ? dirSize(real) : st.size, entries: isDir ? countEntries(real) : undefined };
+  fs.mkdirSync(trashDir, { recursive: true });
+  let result;
+  if (permanent) {
+    fs.rmSync(real, { recursive: isDir, force: false });
+    result = { action: 'deleted', ...info };
+  } else {
+    let to = path.join(trashDir, stamp() + '_' + sanitizeName(path.basename(real))), i = 1;
+    while (fs.existsSync(to)) to = path.join(trashDir, stamp() + '_' + (i++) + '_' + sanitizeName(path.basename(real)));
+    fs.renameSync(real, to);
+    result = { action: 'trashed', ...info, to };
+  }
+  if (fs.existsSync(real)) throw new Error('삭제 확인 실패: 아직 남아 있습니다: ' + real); // 결과 확인 후에만 성공 보고
+  try { fs.appendFileSync(path.join(trashDir, 'delete_log.jsonl'), JSON.stringify({ at: new Date().toISOString(), ...result }) + '\n'); } catch {}
+  log('delete', result.action, real);
+  return result;
+}
+
 // ---------- MCP(stdio) ----------
 const TOOLS = [
   { name: 'file_stat', description: '허용 폴더 안 PC 파일의 크기·형식을 알려준다. (어도비 업로드 시작 시 file_size/media_type 확인용)',
@@ -165,12 +223,14 @@ const TOOLS = [
   { name: 'receive_file', description: '다운로드 주소(피그마 내보내기 URL, 어도비 결과 URL 등)의 파일을 PC 허용 폴더에 저장한다.',
     inputSchema: { type: 'object', properties: { url: { type: 'string' }, dest_dir: { type: 'string' }, filename: { type: 'string' },
       overwrite: { type: 'boolean' }, max_bytes: { type: 'integer' } }, required: ['url', 'dest_dir'] } },
+  { name: 'delete_path', description: '허용 폴더 안의 파일·폴더를 지운다. 기본은 같은 허용 루트의 _trash 폴더로 옮기는 안전 삭제(복구 가능, _trash\\delete_log.jsonl에 기록). 폴더째 지우려면 recurse:true, 완전히 지우려면 permanent:true(휴지통 안의 것은 항상 영구 삭제). 허용 루트 자체, agent·file-mover·_trash 폴더는 지울 수 없다.',
+    inputSchema: { type: 'object', properties: { path: { type: 'string' }, recurse: { type: 'boolean' }, permanent: { type: 'boolean' } }, required: ['path'] } },
 ];
-const IMPL = { file_stat: fileStat, send_file: sendFile, receive_file: receiveFile };
+const IMPL = { file_stat: fileStat, send_file: sendFile, receive_file: receiveFile, delete_path: deletePath };
 
 async function handle(msg, cfg) {
   const { id, method, params } = msg;
-  if (method === 'initialize') return { protocolVersion: params?.protocolVersion || '2025-03-26', capabilities: { tools: {} }, serverInfo: { name: 'nodelab-file-mover', version: '1.0.0' } };
+  if (method === 'initialize') return { protocolVersion: params?.protocolVersion || '2025-03-26', capabilities: { tools: {} }, serverInfo: { name: 'nodelab-file-mover', version: '1.1.0' } };
   if (method === 'ping') return {};
   if (method === 'tools/list') return { tools: TOOLS };
   if (method === 'tools/call') {
@@ -185,7 +245,7 @@ async function handle(msg, cfg) {
 
 function main() {
   const cfg = makeConfig();
-  log('start dirs=' + cfg.dirs.join('|') + ' hosts=' + cfg.hosts.length);
+  log('start v1.1 dirs=' + cfg.dirs.join('|') + ' hosts=' + cfg.hosts.length);
   let buf = '';
   process.stdin.setEncoding('utf8');
   process.stdin.on('data', async d => {
@@ -199,4 +259,4 @@ function main() {
   });
 }
 if (require.main === module) main();
-module.exports = { makeConfig, fileStat, sendFile, receiveFile, checkUrl, handle };
+module.exports = { makeConfig, fileStat, sendFile, receiveFile, deletePath, checkUrl, handle };

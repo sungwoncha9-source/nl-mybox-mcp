@@ -1,9 +1,9 @@
 {
   "name": "nl-file-mover",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "노드랩 파일 이동기 MCP — 피그마·어도비 업로드/다운로드 주소와 PC 허용 폴더 사이로 파일을 옮긴다",
   "type": "commonjs",
   "bin": { "nl-file-mover": "server.js" },
-  "scripts": { "test": "node test/run.js" },
+  "scripts": { "test": "node test/run.js && node test/delete.js" },
   "license": "MIT"
 }

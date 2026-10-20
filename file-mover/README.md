@@ -12,15 +12,25 @@
   "env": { "MOVER_ALLOWED_DIRS": "D:\\nodelab_work" }
 }
 ```
+   (GitHub 로 받는 방식: `"command":"npx","args":["-y","-p","github:sungwoncha9-source/nl-mybox-mcp#add-file-mover","nl-file-mover"]` — 되돌릴 때는 `#add-file-mover` 대신 커밋 `#60b236e`(v1.0) 로 고정)
 3. 클로드 데스크톱 재시작 → 새 대화에서 "file_stat 도구 보이는지" 확인.
 
 ## 환경변수 (선택)
 - MOVER_ALLOWED_DIRS: 읽고 쓸 수 있는 폴더(여러 개는 `;` 구분). 기본 D:\nodelab_work
 - MOVER_ALLOWED_HOSTS: 접속 허용 사이트(쉼표 구분). 기본 figma/adobe/amazonaws/cloudfront 등
 - MOVER_MAX_BYTES: 한 번에 옮길 최대 크기. 기본 104857600(100MB)
+- MOVER_PROTECTED: 지우면 안 되는 경로 추가(`;` 구분). 기본 보호: agent, file-mover, _trash
+
+## 도구 4개
+file_stat(확인) · send_file(PC→주소) · receive_file(주소→PC) · delete_path(삭제)
+
+## 삭제 (delete_path, v1.1)
+- 기본은 휴지통: 허용 폴더 안 `_trash\<날짜시각>_<이름>` 으로 옮김(복구 가능). 기록은 `_trash\delete_log.jsonl`.
+- 비어 있지 않은 폴더는 `recurse:true` 필요. `permanent:true` 면 완전 삭제. `_trash` 안의 항목을 지우면 영구 삭제.
+- 허용 폴더 밖, `..`·링크 탈출, 허용 루트 자체, 보호 경로(및 그것을 포함한 상위 폴더)는 거절하고 이유를 돌려줌.
 
 ## 시험
-`node test/run.js` → 16 passed 가 나와야 정상.
+`npm test` → `16 passed` 와 `22 passed` 가 나와야 정상.
 
 ## 쓰는 순서
 - 피그마 올리기: upload_assets → **바로** send_file(mode=multipart, url=submitUrl)  (10분 만료, 1회용)
