@@ -1,13 +1,16 @@
 #!/usr/bin/env node
 'use strict';
-// 노드랩 파일 이동기 MCP v1.1 — PC에서 실행. 도구 4개: file_stat, send_file, receive_file, delete_path
-// 변경점(v1.0 대비): delete_path 추가(기본은 휴지통 폴더로 이동, permanent:true일 때만 영구 삭제). 나머지 3개 도구는 동작 그대로.
+// 노드랩 파일 이동기 MCP v1.2 — PC에서 실행. 도구 5개: file_stat, send_file, receive_file, delete_path, receive_bytes
+// 변경점(v1.1 대비): receive_bytes 추가(화면이 보낸 파일 바이트를 허용 폴더에 씀, 나눠 보내기·sha256 확인 지원). 나머지 4개 도구는 동작 그대로.
+// 변경점(v1.0 대비, v1.1): delete_path 추가(기본은 휴지통 폴더로 이동, permanent:true일 때만 영구 삭제).
 // 의존성 없음(Node 18+). 클로드는 "주소(URL)와 PC 경로"만 말하고, 파일 바이트는 이 프로그램이 직접 옮긴다.
 const fs = require('fs');
 const path = require('path');
 const dns = require('dns').promises;
 const net = require('net');
+const crypto = require('crypto');
 
+const VERSION = '1.2.0';
 const DEFAULT_HOSTS = ['figma.com', 'figma-alpha-api.s3.us-west-2.amazonaws.com', 'amazonaws.com',
   'adobe.io', 'adobe.com', 'adobelogin.com', 'cloudfront.net', 'behance.net'];
 
@@ -212,6 +215,69 @@ async function deletePath(a, cfg) {
   return result;
 }
 
+// ---------- 바이트 받아 쓰기 (v1.2 추가) ----------
+// 화면(아티팩트)이 MCP로 파일을 보내면 base64 글자로 도착한다. 이 도구가 그것을 허용 폴더에 파일로 쓴다.
+// 한 번에 다 보내거나(offset 없음), 큰 파일은 순서대로 나눠 보낸다(offset + total_bytes).
+const B64 = /^[A-Za-z0-9+/]*={0,2}$/;
+function assertWritable(real, cfg) { // 보호 경로(agent, file-mover, _trash 등) 안에는 쓰지 못한다
+  for (const p of cfg.protectedPaths) {
+    const r = norm(real), q = norm(p);
+    if (r === q || r.startsWith(q + path.sep)) throw new Error('보호된 경로에는 쓸 수 없습니다: ' + p);
+  }
+}
+async function receiveBytes(a, cfg) {
+  if (!a || typeof a.dest_dir !== 'string' || !a.dest_dir.trim()) throw new Error('dest_dir가 필요합니다');
+  if (typeof a.filename !== 'string' || !a.filename.trim()) throw new Error('filename이 필요합니다');
+  if (typeof a.content_base64 !== 'string') throw new Error('content_base64가 필요합니다');
+  const b64 = a.content_base64;
+  if (b64.length % 4 !== 0 || !B64.test(b64)) throw new Error('content_base64가 올바른 base64 글자가 아닙니다');
+  const pad = b64.endsWith('==') ? 2 : b64.endsWith('=') ? 1 : 0;
+  const len = b64.length / 4 * 3 - pad;
+  if (len > cfg.maxBytes) throw new Error('크기 한도 초과: ' + len + ' > ' + cfg.maxBytes);
+  const dir = insideAllowed(a.dest_dir, cfg);
+  assertWritable(dir, cfg);
+  const name = sanitizeName(a.filename);
+  if (/\.part$/i.test(name)) throw new Error('.part로 끝나는 이름은 쓸 수 없습니다: ' + name);
+  const chunked = a.offset !== undefined || a.total_bytes !== undefined;
+  let offset = 0, total = len;
+  if (chunked) {
+    offset = Number(a.offset); total = Number(a.total_bytes);
+    if (!Number.isInteger(offset) || offset < 0) throw new Error('offset은 0 이상의 정수여야 합니다');
+    if (!Number.isInteger(total) || total <= 0) throw new Error('나눠 보낼 때는 total_bytes(전체 크기)가 필요합니다');
+    if (total > cfg.maxBytes) throw new Error('크기 한도 초과: ' + total + ' > ' + cfg.maxBytes);
+    if (offset + len > total) throw new Error('offset+크기가 total_bytes를 넘습니다');
+  }
+  if (a.sha256 !== undefined && !/^[0-9a-f]{64}$/i.test(String(a.sha256))) throw new Error('sha256은 16진수 64글자여야 합니다');
+  fs.mkdirSync(dir, { recursive: true });
+  const part = path.join(dir, name + '.part');
+  insideAllowed(part, cfg);
+  const buf = Buffer.from(b64, 'base64');
+  if (chunked && offset > 0) {
+    const have = fs.existsSync(part) ? fs.statSync(part).size : -1;
+    if (have !== offset) throw new Error('순서가 맞지 않습니다: 지금까지 받은 크기 ' + have + ', 보낸 offset ' + offset + ' (처음부터 다시 보내려면 offset 0)');
+  }
+  const fd = fs.openSync(part, offset > 0 ? 'a' : 'w');
+  try { fs.writeSync(fd, buf, 0, buf.length); } catch (e) { try { fs.closeSync(fd); } catch {} try { fs.unlinkSync(part); } catch {} throw e; }
+  fs.closeSync(fd);
+  const received = offset + buf.length;
+  if (chunked && received < total) return { done: false, received, total_bytes: total, part_path: part };
+  // 다 모였다: 크기·sha256 확인 뒤 제 이름으로
+  const abort = msg => { try { fs.unlinkSync(part); } catch {} throw new Error(msg); };
+  const size = fs.statSync(part).size;
+  if (size !== total) abort('받은 크기가 맞지 않습니다: ' + size + ' != ' + total);
+  const sha = crypto.createHash('sha256').update(fs.readFileSync(part)).digest('hex');
+  if (a.sha256 && sha !== String(a.sha256).toLowerCase()) abort('sha256이 다릅니다(전송 중 깨짐): 받은 ' + sha + ' / 기대 ' + String(a.sha256).toLowerCase());
+  let target = path.join(dir, name);
+  if (!a.overwrite) { const ext = path.extname(name), base = path.basename(name, ext); let i = 1;
+    while (fs.existsSync(target)) target = path.join(dir, base + '_' + (i++) + ext); }
+  try { insideAllowed(target, cfg); assertWritable(target, cfg);
+    if (fs.existsSync(target) && fs.statSync(target).isDirectory()) throw new Error('같은 이름의 폴더가 있습니다: ' + target); }
+  catch (e) { abort(e.message); }
+  fs.renameSync(part, target);
+  log('receive_bytes', target, size + 'B');
+  return { done: true, saved_path: target, bytes: size, sha256: sha, renamed: path.basename(target) !== name };
+}
+
 // ---------- MCP(stdio) ----------
 const TOOLS = [
   { name: 'file_stat', description: '허용 폴더 안 PC 파일의 크기·형식을 알려준다. (어도비 업로드 시작 시 file_size/media_type 확인용)',
@@ -225,12 +291,15 @@ const TOOLS = [
       overwrite: { type: 'boolean' }, max_bytes: { type: 'integer' } }, required: ['url', 'dest_dir'] } },
   { name: 'delete_path', description: '허용 폴더 안의 파일·폴더를 지운다. 기본은 같은 허용 루트의 _trash 폴더로 옮기는 안전 삭제(복구 가능, _trash\\delete_log.jsonl에 기록). 폴더째 지우려면 recurse:true, 완전히 지우려면 permanent:true(휴지통 안의 것은 항상 영구 삭제). 허용 루트 자체, agent·file-mover·_trash 폴더는 지울 수 없다.',
     inputSchema: { type: 'object', properties: { path: { type: 'string' }, recurse: { type: 'boolean' }, permanent: { type: 'boolean' } }, required: ['path'] } },
+  { name: 'receive_bytes', description: '호출자가 base64 글자(content_base64)로 보낸 파일 바이트를 허용 폴더에 파일로 쓴다(화면·아티팩트가 PC에 파일을 직접 넘길 때). 같은 이름이 있으면 _1,_2를 붙여 보존(overwrite:true면 덮어씀). 큰 파일은 순서대로 나눠 보낸다: offset(0부터, 이어 받은 크기와 같아야 함)과 total_bytes(전체 크기)를 매번 같이 보내고, 마지막 조각이 오면 done:true와 saved_path·sha256을 돌려준다. sha256을 주면 전송 중 깨짐을 확인. agent·file-mover·_trash 안에는 쓸 수 없다.',
+    inputSchema: { type: 'object', properties: { dest_dir: { type: 'string' }, filename: { type: 'string' }, content_base64: { type: 'string' },
+      overwrite: { type: 'boolean' }, offset: { type: 'integer' }, total_bytes: { type: 'integer' }, sha256: { type: 'string' } }, required: ['dest_dir', 'filename', 'content_base64'] } },
 ];
-const IMPL = { file_stat: fileStat, send_file: sendFile, receive_file: receiveFile, delete_path: deletePath };
+const IMPL = { file_stat: fileStat, send_file: sendFile, receive_file: receiveFile, delete_path: deletePath, receive_bytes: receiveBytes };
 
 async function handle(msg, cfg) {
   const { id, method, params } = msg;
-  if (method === 'initialize') return { protocolVersion: params?.protocolVersion || '2025-03-26', capabilities: { tools: {} }, serverInfo: { name: 'nodelab-file-mover', version: '1.1.0' } };
+  if (method === 'initialize') return { protocolVersion: params?.protocolVersion || '2025-03-26', capabilities: { tools: {} }, serverInfo: { name: 'nodelab-file-mover', version: VERSION } };
   if (method === 'ping') return {};
   if (method === 'tools/list') return { tools: TOOLS };
   if (method === 'tools/call') {
@@ -245,13 +314,17 @@ async function handle(msg, cfg) {
 
 function main() {
   const cfg = makeConfig();
-  log('start v1.1 dirs=' + cfg.dirs.join('|') + ' hosts=' + cfg.hosts.length);
-  let buf = '';
-  process.stdin.setEncoding('utf8');
+  log('start v' + VERSION + ' dirs='+ cfg.dirs.join('|') + ' hosts=' + cfg.hosts.length);
+  // 입력은 바이트 조각으로 모았다가 줄바꿈이 올 때만 글자로 바꾼다(21MB짜리 한 줄이 와도 느려지지 않게). 한글이 조각 사이에서 잘려도 안전.
+  let parts = [];
   process.stdin.on('data', async d => {
-    buf += d; let i;
-    while ((i = buf.indexOf('\n')) >= 0) {
-      const line = buf.slice(0, i).trim(); buf = buf.slice(i + 1); if (!line) continue;
+    const lines = []; let start = 0, i;
+    while ((i = d.indexOf(10, start)) >= 0) {
+      parts.push(d.subarray(start, i)); lines.push(Buffer.concat(parts).toString('utf8').trim()); parts = []; start = i + 1;
+    }
+    if (start < d.length) parts.push(d.subarray(start));
+    for (const line of lines) {
+      if (!line) continue;
       let msg; try { msg = JSON.parse(line); } catch { continue; }
       try { const r = await handle(msg, cfg); if (msg.id !== undefined && r !== undefined) process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: msg.id, result: r }) + '\n'); }
       catch (e) { if (msg.id !== undefined) process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: msg.id, error: { code: e.code || -32603, message: e.message } }) + '\n'); }
@@ -259,4 +332,4 @@ function main() {
   });
 }
 if (require.main === module) main();
-module.exports = { makeConfig, fileStat, sendFile, receiveFile, deletePath, checkUrl, handle };
+module.exports = { makeConfig, fileStat, sendFile, receiveFile, deletePath, receiveBytes, checkUrl, handle };

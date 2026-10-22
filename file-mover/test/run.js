@@ -28,7 +28,7 @@ const srv = http.createServer((req, res) => {
   const call = async (name, args) => { const r = (await rpc('tools/call', { name, arguments: args })).result; return { err: !!r.isError, text: r.content[0].text }; };
   let pass = 0; const t = async (n, f) => { try { await f(); pass++; console.log('PASS', n); } catch (e) { console.log('FAIL', n, e.message); process.exitCode = 1; } };
 
-  await t('initialize+tools/list', async () => { const i = await rpc('initialize', { protocolVersion: '2025-03-26' }); assert(i.result.serverInfo); const l = await rpc('tools/list'); assert.deepStrictEqual(l.result.tools.map(x => x.name), ['file_stat', 'send_file', 'receive_file', 'delete_path']); });
+  await t('initialize+tools/list', async () => { const i = await rpc('initialize', { protocolVersion: '2025-03-26' }); assert(i.result.serverInfo); const l = await rpc('tools/list'); assert.deepStrictEqual(l.result.tools.map(x => x.name), ['file_stat', 'send_file', 'receive_file', 'delete_path', 'receive_bytes']); });
   await t('file_stat', async () => { const r = await call('file_stat', { path: path.join(work, 'a.png') }); assert(!r.err && JSON.parse(r.text).size === 1000 && JSON.parse(r.text).mime === 'image/png'); });
   await t('피그마식 multipart 업로드', async () => { const r = await call('send_file', { path: path.join(work, 'a.png'), url: base + '/figma/submit', mode: 'multipart' }); assert(!r.err, r.text); assert(got.figma.ct.startsWith('multipart/form-data') && got.figma.hasField); });
   await t('어도비식 블록 PUT 2개(offset/length)', async () => {
