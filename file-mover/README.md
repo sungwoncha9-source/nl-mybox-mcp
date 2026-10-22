@@ -2,7 +2,7 @@
 
 피그마·어도비와 PC 폴더 사이로 파일을 옮기는 MCP 프로그램. 클로드가 주소와 경로만 말하면 이 프로그램이 직접 옮깁니다.
 v1.2부터는 화면(아티팩트)이 MCP로 보낸 파일 바이트도 받아 PC 허용 폴더에 씁니다(receive_bytes).
-v1.3부터는 PC 화면을 파일로 찍고(capture_screen) 그 위에 그림·글자를 얹습니다(annotate_image). 브라우저를 거치지 않습니다.
+v1.3부터는 PC 화면을 파일로 찍고(capture_screen) 그 위에 그림·글자를 얹습니다(annotate_image). v1.4는 이미지 옆에 코멘트란을 붙입니다. 브라우저를 거치지 않습니다.
 
 ## 설치 (사장님 PC, 1회)
 1. 폴더: `D:\nodelab_work\file-mover\` (server.js 가 들어 있음). Node 18 이상 필요(nodelab-fs 가 이미 돌면 있음).
@@ -14,7 +14,7 @@ v1.3부터는 PC 화면을 파일로 찍고(capture_screen) 그 위에 그림·�
   "env": { "MOVER_ALLOWED_DIRS": "D:\\nodelab_work" }
 }
 ```
-   (GitHub 로 받는 방식: `"command":"npx","args":["-y","-p","github:sungwoncha9-source/nl-mybox-mcp#add-file-mover","nl-file-mover"]` — 되돌릴 때는 `#add-file-mover` 대신 커밋으로 고정: v1.0 `#60b236e`, v1.1 `#3633235`, v1.2 `#50a78d9`)
+   (GitHub 로 받는 방식: `"command":"npx","args":["-y","-p","github:sungwoncha9-source/nl-mybox-mcp#add-file-mover","nl-file-mover"]` — 되돌릴 때는 `#add-file-mover` 대신 커밋으로 고정: v1.0 `#60b236e`, v1.1 `#3633235`, v1.2 `#50a78d9`, v1.3 `#291190b`)
    (npx는 같은 주소를 캐시해 두므로, 새 판을 받으려면 `#add-file-mover` 대신 새 커밋 번호를 적거나 npx 캐시 폴더 `%LOCALAPPDATA%\npm-cache\_npx`를 지우고 재시작)
 3. 클로드 데스크톱 재시작 → 새 대화에서 "file_stat 도구 보이는지" 확인.
 
@@ -52,10 +52,12 @@ file_stat(확인) · send_file(PC→주소) · receive_file(주소→PC) · dele
 - 종류: `rect` · `ellipse` · `line` · `arrow` · `text`(한글 글꼴 맑은 고딕, `\n` 줄바꿈, `bg`로 글자 뒤 색 상자) · `number`(번호 동그라미) · `freehand`(손그림 `points`) · `highlight`(형광펜) · `mask`(가리기). 공통: `color`, `width`, `opacity`.
 - 좌표는 기본이 이미지 가로·세로 대비 비율(0~1), `units:"px"`면 픽셀. `crop{x,y,w,h}`로 일부만 잘라 내고 `max_width`로 줄여 저장. 이미지 밖에 놓인 항목은 그리되 결과 `warnings`로 알려 준다.
 - 색에는 `#e11d48`, `red`, `rgba(...)` 꼴만 받고, 글자는 모두 이스케이프하므로 입력으로 그림 구조를 바꿀 수 없다.
+- **코멘트란(`panel`, v1.4)**: 이미지를 넓혀 옆에 글 칸을 붙인다. `panel{side:"right"|"left"|"top"|"bottom"(기본 right), size(1 이하면 비율, 초과면 픽셀, 기본 0.35), title, text, items:[{text, n, color}], color(란 바탕), font_size}`. 글은 칸 폭에 맞춰 자동 줄바꿈하고 번호 동그라미가 붙는다. 이미지 위 `number`와 `n`을 같게 두면 "그림의 ①=코멘트 ①"로 맞는다(`n`을 안 주면 1,2,3… 자동). 글이 길면 캔버스를 늘리고 `warnings`로 알린다. `crop`·`max_width`와 함께 쓸 수 있다(줄이기는 코멘트란까지 포함). 코멘트란이 있으면 이미지 밖(란 위)으로 걸친 화살표도 경고 없이 그린다.
+- **로컬 보관은 `D:\nodelab_work` 한 곳**: 찍고 그린 파일은 여기에만 둔다. 다른 곳(MYBOX 등)이 필요하면 옮긴 뒤 확인하고 로컬 사본을 지운다 — 옮기기: mybox-mcp `files_upload_from_path`(또는 허용 폴더 안에서는 nodelab-fs `move_file`) → 올라간 크기 확인 → file-mover `delete_path`(기본은 `_trash`로 이동, `permanent:true`면 완전 삭제).
 - 쓰는 순서: capture_screen → saved_path를 nodelab-fs `read_media_file`로 열어 눈으로 확인 → annotate_image → 결과도 같은 방법으로 확인 → 필요하면 mybox-mcp `files_upload_from_path`로 MYBOX에 올림.
 
 ## 시험
-`npm test` → `16 passed`, `22 passed`, `31 passed`, `62 passed` 가 차례로 나와야 정상. (실제 Windows 화면 호출은 자동 시험에 없다: capture.ps1은 문법 검사만 했고, PC에서 한 장 찍어 확인한다.)
+`npm test` → `16 passed`, `22 passed`, `31 passed`, `62 passed`, `36 passed` 가 차례로 나와야 정상. (실제 Windows 화면 호출은 자동 시험에 없다: capture.ps1은 문법 검사만 했고, PC에서 한 장 찍어 확인한다.)
 
 ## 쓰는 순서
 - 피그마 올리기: upload_assets → **바로** send_file(mode=multipart, url=submitUrl)  (10분 만료, 1회용)

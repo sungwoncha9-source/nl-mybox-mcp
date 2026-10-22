@@ -1,13 +1,13 @@
 {
   "name": "nl-file-mover",
-  "version": "1.3.0",
+  "version": "1.4.0",
   "description": "노드랩 파일 이동기 MCP — 피그마·어도비 주소, 화면이 보낸 파일 바이트, PC 화면 캡처·그림 얹기를 PC 허용 폴더와 이어 준다",
   "type": "commonjs",
   "bin": {
     "nl-file-mover": "server.js"
   },
   "scripts": {
-    "test": "node test/run.js && node test/delete.js && node test/bytes.js && node test/capture.js"
+    "test": "node test/run.js && node test/delete.js && node test/bytes.js && node test/capture.js && node test/panel.js"
   },
   "license": "MIT",
   "optionalDependencies": {

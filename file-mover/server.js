@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 'use strict';
-// 노드랩 파일 이동기 MCP v1.3 — PC에서 실행. 도구 7개: file_stat, send_file, receive_file, delete_path, receive_bytes, capture_screen, annotate_image
+// 노드랩 파일 이동기 MCP v1.4 — PC에서 실행. 도구 7개: file_stat, send_file, receive_file, delete_path, receive_bytes, capture_screen, annotate_image
+// 변경점(v1.3 대비): annotate_image에 panel(코멘트란) 추가 — 캔버스를 넓혀 제목·번호 코멘트를 적음. number 번호 자동 매김 보정. 나머지 동작 그대로.
 // 변경점(v1.2 대비): capture_screen(PC 화면을 PNG 파일로, 기본 꺼짐 MOVER_ENABLE_CAPTURE=1), annotate_image(그림·글자 얹기, 자르기). 나머지 5개 도구는 동작 그대로.
 // 변경점(v1.1 대비): receive_bytes 추가(화면이 보낸 파일 바이트를 허용 폴더에 씀, 나눠 보내기·sha256 확인 지원). 나머지 4개 도구는 동작 그대로.
 // 변경점(v1.0 대비, v1.1): delete_path 추가(기본은 휴지통 폴더로 이동, permanent:true일 때만 영구 삭제).
@@ -11,7 +12,7 @@ const dns = require('dns').promises;
 const net = require('net');
 const crypto = require('crypto');
 
-const VERSION = '1.3.0';
+const VERSION = '1.4.0';
 const DEFAULT_HOSTS = ['figma.com', 'figma-alpha-api.s3.us-west-2.amazonaws.com', 'amazonaws.com',
   'adobe.io', 'adobe.com', 'adobelogin.com', 'cloudfront.net', 'behance.net'];
 
@@ -339,7 +340,7 @@ async function annotateImage(a, cfg) {
   assertWritable(outDir, cfg);
   const base = path.basename(real, path.extname(real));
   const name = pngName(a.out_filename, base + '_annotated.png');
-  const spec = { items: a.items, units: a.units, crop: a.crop, max_width: a.max_width };
+  const spec = { items: a.items, units: a.units, crop: a.crop, max_width: a.max_width, panel: a.panel };
   const r = require('./annotate.js').annotate(fs.readFileSync(real), spec); // 입력 검사·그리기를 먼저 끝내고 그 뒤에만 파일을 만든다
   fs.mkdirSync(outDir, { recursive: true });
   const target = uniqueTarget(outDir, name, a.overwrite === true);
@@ -374,9 +375,10 @@ const TOOLS = [
       delay_ms: { type: 'integer' }, overwrite: { type: 'boolean' }, info_only: { type: 'boolean' } } } },
   { name: 'annotate_image', description: '허용 폴더 안 PNG/JPG 위에 그림·글자를 얹어 새 PNG로 저장한다(원본은 그대로). items 배열에 아래 종류를 순서대로 쌓는다. 좌표 기본은 이미지 가로·세로 대비 비율(0~1), units:"px"면 픽셀. 색은 #e11d48, red, rgba(...). ' +
     'rect{x,y,w,h,color,width,fill,radius} · ellipse{x,y,w,h,color,width,fill} · line{x1,y1,x2,y2} · arrow{x1,y1,x2,y2}(끝에 화살촉) · text{x,y,text,size,color,bg,align,bold}(x,y는 글자 상자 왼쪽 위, \\n으로 줄바꿈, size 1 이하는 이미지 높이 비율, bg를 주면 글자 뒤 색 상자) · number{x,y,n,size,color}(번호 동그라미) · freehand{points:[[x,y],...],color,width} · highlight{x,y,w,h,color,opacity}(형광펜) · mask{x,y,w,h,color}(가리기, 기본 검정). ' +
-    '공통: width(선 굵기), opacity(0~1). crop{x,y,w,h}로 일부만 잘라 내고, max_width로 줄여 저장. out_dir·out_filename 기본은 원본 옆 <이름>_annotated.png, 같은 이름이 있으면 _1,_2(overwrite:true여도 원본은 덮어쓰지 않음). 결과의 warnings에 이미지 밖에 놓인 항목이 나온다. 저장 뒤 saved_path를 read_media_file로 열어 확인할 것.',
+    '공통: width(선 굵기), opacity(0~1). crop{x,y,w,h}로 일부만 잘라 내고, max_width로 줄여 저장. out_dir·out_filename 기본은 원본 옆 <이름>_annotated.png, 같은 이름이 있으면 _1,_2(overwrite:true여도 원본은 덮어쓰지 않음). 결과의 warnings에 이미지 밖에 놓인 항목이 나온다. ' +
+    'panel{side,size,title,text,items:[{n,text,color}],color,text_color,title_color,font_size}: 캔버스를 넓혀 코멘트란을 붙인다. side는 right(기본)·left·top·bottom, size는 란의 폭(left/right, 가로 대비 비율 기본 0.35 또는 px)이나 높이(top/bottom, 기본은 글에 맞춰 자동). title은 제목 한 줄, text는 설명 글, items는 번호 코멘트 목록(n을 안 주면 1,2,3… 자동, 이미지 위 number 동그라미의 번호와 짝). 글은 란 폭에 맞춰 자동 줄바꿈하고, 글이 길면 캔버스를 늘린다. 좌표는 코멘트란을 뺀 원래 이미지 기준이라 panel을 붙여도 그대로 쓴다. number의 n을 안 주면 number끼리 1,2,3… 순서로 매긴다. 저장 뒤 saved_path를 read_media_file로 열어 확인할 것.',
     inputSchema: { type: 'object', properties: { path: { type: 'string' }, items: { type: 'array', items: { type: 'object' } }, units: { type: 'string', enum: ['ratio', 'px'] },
-      crop: { type: 'object' }, max_width: { type: 'integer' }, out_dir: { type: 'string' }, out_filename: { type: 'string' }, overwrite: { type: 'boolean' } }, required: ['path'] } },
+      crop: { type: 'object' }, panel: { type: 'object' }, max_width: { type: 'integer' }, out_dir: { type: 'string' }, out_filename: { type: 'string' }, overwrite: { type: 'boolean' } }, required: ['path'] } },
 ];
 const IMPL = { file_stat: fileStat, send_file: sendFile, receive_file: receiveFile, delete_path: deletePath, receive_bytes: receiveBytes, capture_screen: captureScreen, annotate_image: annotateImage };
 

@@ -32,6 +32,90 @@ function color(c, def) {
   return c;
 }
 
+
+// ---------- 글 줄바꿈과 코멘트란 ----------
+const chW = (ch, s) => { const c = ch.charCodeAt(0); return c === 32 ? s * 0.3 : c > 0x2e80 ? s : s * 0.58; };
+const lineW = (l, s) => [...l].reduce((a, ch) => a + chW(ch, s), 0);
+// 글자 폭으로 줄을 나눈다: 한글은 글자 단위, 영어는 띄어쓰기 단위(띄어쓰기 없는 긴 글은 강제로 끊음). 글자 폭은 어림값이다.
+function wrapText(text, maxW, s) {
+  const out = [];
+  for (const para of String(text).split(/\r?\n/)) {
+    if (para === '') { out.push(''); continue; }
+    let line = '', w = 0, lastSpace = -1;
+    for (const ch of para) {
+      const cw = chW(ch, s);
+      if (w + cw > maxW && line) {
+        if (ch !== ' ' && lastSpace > 0) { out.push(line.slice(0, lastSpace).trimEnd()); line = line.slice(lastSpace + 1); w = lineW(line, s); }
+        else { out.push(line.trimEnd()); line = ''; w = 0; }
+        lastSpace = line.lastIndexOf(' ');
+        if (ch === ' ') continue;
+      }
+      if (ch === ' ') lastSpace = line.length;
+      line += ch; w += cw;
+    }
+    out.push(line.trimEnd());
+  }
+  return out;
+}
+
+// 좌표는 코멘트란 왼쪽 위가 (0,0). 돌려주는 contentH는 글이 차지한 높이(위아래 여백 포함).
+function layoutPanel(panel, cw, ch, H, defSize, warnings) {
+  if (!panel || typeof panel !== 'object') throw new Error('panel은 객체여야 합니다');
+  const side = panel.side === undefined ? 'right' : panel.side;
+  if (!['right', 'left', 'top', 'bottom'].includes(side)) throw new Error('panel.side는 right, left, top, bottom 중 하나입니다');
+  const horizontal = side === 'left' || side === 'right';
+  let s = defSize;
+  if (panel.font_size !== undefined) { const f = num(panel.font_size, 'panel.font_size'); if (f <= 0) throw new Error('panel.font_size는 0보다 커야 합니다'); s = r2(f <= 1 ? f * H : f); }
+  const pad = Math.round(s * 0.8), lh = r2(s * 1.35);
+  let pw = 0, ph = 0, sizeGiven = false;
+  if (panel.size !== undefined) {
+    const z = num(panel.size, 'panel.size'); if (z <= 0) throw new Error('panel.size는 0보다 커야 합니다');
+    sizeGiven = true;
+    if (horizontal) pw = Math.round(z <= 1 ? z * cw : z); else ph = Math.round(z <= 1 ? z * ch : z);
+  } else if (horizontal) pw = Math.round(cw * 0.35);
+  const textW = (horizontal ? pw : cw) - 2 * pad;
+  if (textW < s * 4) throw new Error('코멘트란이 너무 좁습니다(글 영역 ' + Math.round(textW) + 'px). size를 키우거나 font_size를 줄이세요');
+  const pcolor = color(panel.color, '#ffffff'), tcol = color(panel.text_color, '#1f2937'), hcol = color(panel.title_color, '#111827');
+  const parts = [];
+  let y = pad;
+  const textLines = (lines, x, y0, size, fill, bold) => '<text font-family="' + FONT + '" font-size="' + size + '"' + (bold ? ' font-weight="bold"' : '') + ' fill="' + fill + '">' +
+    lines.map((l, i) => '<tspan x="' + x + '" y="' + r2(y0 + size * 0.95 + i * size * 1.35) + '">' + (esc(l) || ' ') + '</tspan>').join('') + '</text>';
+  if (panel.title !== undefined && String(panel.title) !== '') {
+    const t = String(panel.title); if (t.length > 200) throw new Error('panel.title은 최대 200글자입니다');
+    const ts = r2(s * 1.15), L = wrapText(t, textW, ts);
+    parts.push(textLines(L, pad, y, ts, hcol, true)); y += L.length * ts * 1.35 + s * 0.25;
+    parts.push('<line x1="' + pad + '" y1="' + r2(y) + '" x2="' + (pad + textW) + '" y2="' + r2(y) + '" stroke="#c9c9cf" stroke-width="2"/>'); y += s * 0.6;
+  }
+  if (panel.text !== undefined && String(panel.text) !== '') {
+    const t = String(panel.text); if (t.length > 3000) throw new Error('panel.text는 최대 3000글자입니다');
+    const L = wrapText(t, textW, s);
+    parts.push(textLines(L, pad, y, s, tcol, false)); y += L.length * lh + s * 0.5;
+  }
+  const items = panel.items === undefined ? [] : panel.items;
+  if (!Array.isArray(items)) throw new Error('panel.items는 배열이어야 합니다');
+  if (items.length > 50) throw new Error('panel.items는 최대 50개입니다');
+  const r = r2(s * 0.62), indent = r2(r * 2 + s * 0.45);
+  let auto = 0;
+  items.forEach((it, i) => {
+    if (!it || typeof it !== 'object') throw new Error('panel.items[' + i + ']가 올바르지 않습니다');
+    const t = String(it.text === undefined ? '' : it.text);
+    if (!t) throw new Error('panel.items[' + i + '].text가 비어 있습니다');
+    if (t.length > 1000) throw new Error('panel.items[' + i + '].text는 최대 1000글자입니다');
+    const L = wrapText(t, textW - indent, s), h = Math.max(2 * r, L.length * lh);
+    const bcol = color(it.color, '#e11d48'), icol = color(it.text_color, tcol);
+    const n = it.n === null || it.n === '' ? undefined : it.n;
+    const label = n === undefined ? String(++auto) : String(n).slice(0, 4);
+    parts.push('<circle cx="' + r2(pad + r) + '" cy="' + r2(y + r) + '" r="' + r + '" fill="' + bcol + '"/>' +
+      '<text x="' + r2(pad + r) + '" y="' + r2(y + r + s * 0.36) + '" font-family="' + FONT + '" font-size="' + s + '" font-weight="bold" text-anchor="middle" fill="#ffffff">' + esc(label) + '</text>');
+    parts.push(textLines(L, pad + indent, y, s, icol, false));
+    y += h + s * 0.6;
+  });
+  const contentH = Math.ceil(y + pad - s * 0.6);
+  if (!horizontal) { if (sizeGiven && ph < contentH) warnings.push('코멘트가 길어 코멘트란 높이를 ' + ph + 'px에서 ' + contentH + 'px로 늘렸습니다'); ph = sizeGiven ? Math.max(ph, contentH) : Math.max(contentH, Math.round(s * 3)); }
+  else if (contentH > ch) warnings.push('코멘트가 길어 이미지 높이(' + ch + 'px)보다 캔버스를 ' + contentH + 'px로 늘렸습니다');
+  return { side, horizontal, pw, ph, color: pcolor, svg: parts.join(''), contentH };
+}
+
 function buildSvg(info, buf, spec) {
   if (!spec || typeof spec !== 'object') throw new Error('설정이 필요합니다');
   const W = info.w, H = info.h;
@@ -45,12 +129,13 @@ function buildSvg(info, buf, spec) {
   const defSize = Math.max(18, Math.round(H * 0.028));              // 기본 글자 크기
   const warnings = [];
   const out = [];
+  let numAuto = 0;
   const sw = it => { const v = it.width === undefined ? base : num(it.width, 'width'); if (v <= 0 || v > Math.max(W, H)) throw new Error('width가 범위를 벗어납니다'); return r2(v); };
   const sizeOf = it => { if (it.size === undefined) return defSize; const s = num(it.size, 'size'); if (s <= 0) throw new Error('size는 0보다 커야 합니다'); return r2(s <= 1 ? s * H : s); };
   const op = it => it.opacity === undefined ? '' : ' opacity="' + Math.min(1, Math.max(0, num(it.opacity, 'opacity'))) + '"';
   const box = it => { const x = X(it.x), y = Y(it.y), w = r2((units === 'px' ? 1 : W) * num(it.w, 'w')), h = r2((units === 'px' ? 1 : H) * num(it.h, 'h'));
     if (w <= 0 || h <= 0) throw new Error('w, h는 0보다 커야 합니다'); return { x, y, w, h }; };
-  const inside = (x, y) => x >= -W * 0.05 && x <= W * 1.05 && y >= -H * 0.05 && y <= H * 1.05;
+  const inside = (x, y) => spec.panel !== undefined || (x >= -W * 0.05 && x <= W * 1.05 && y >= -H * 0.05 && y <= H * 1.05); // 코멘트란이 있으면 이미지 밖(란 위)에도 그릴 수 있다
 
   items.forEach((it, idx) => {
     if (!it || typeof it !== 'object') throw new Error('items[' + idx + ']가 올바르지 않습니다');
@@ -95,7 +180,7 @@ function buildSvg(info, buf, spec) {
         d += ' L' + P[P.length - 1][0] + ' ' + P[P.length - 1][1];
         out.push('<path d="' + d + '" fill="none" stroke="' + color(it.color, '#e11d48') + '" stroke-width="' + sw(it) + '" stroke-linecap="round" stroke-linejoin="round"' + op(it) + '/>');
       } else if (t === 'number') {
-        const x = X(it.x), y = Y(it.y), s = sizeOf(it), n = esc(it.n === undefined ? idx + 1 : String(it.n).slice(0, 4));
+        const x = X(it.x), y = Y(it.y), s = sizeOf(it), n = esc(it.n === undefined || it.n === null || it.n === '' ? ++numAuto : String(it.n).slice(0, 4));
         if (!inside(x, y)) warnings.push('items[' + idx + '] number가 이미지 밖에 있습니다');
         out.push('<g' + op(it) + '><circle cx="' + x + '" cy="' + y + '" r="' + r2(s * 0.75) + '" fill="' + color(it.color, '#e11d48') + '" stroke="#ffffff" stroke-width="' + r2(Math.max(2, s * 0.1)) + '"/>' +
           '<text x="' + x + '" y="' + r2(y + s * 0.36) + '" font-family="' + FONT + '" font-size="' + s + '" font-weight="bold" text-anchor="middle" fill="#ffffff">' + n + '</text></g>');
@@ -132,10 +217,25 @@ function buildSvg(info, buf, spec) {
     cw = Math.min(cw, W - cx); ch = Math.min(ch, H - cy);
     if (cw < 1 || ch < 1) throw new Error('crop 영역이 이미지 밖입니다');
   }
-  const b64 = buf.toString('base64');
-  const svg = '<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="' + cw + '" height="' + ch + '" viewBox="' + cx + ' ' + cy + ' ' + cw + ' ' + ch + '">' +
-    '<image x="0" y="0" width="' + W + '" height="' + H + '" xlink:href="data:' + info.mime + ';base64,' + b64 + '"/>' + out.join('') + '</svg>';
-  return { svg, width: cw, height: ch, count: items.length, warnings };
+  // 코멘트란(panel): 캔버스를 한쪽으로 넓혀 제목·글·번호 코멘트를 적는다
+  let ox = 0, oy = 0, CW = cw, CH = ch, panelSvg = '', bg = '';
+  if (spec.panel !== undefined) {
+    const P = layoutPanel(spec.panel, cw, ch, H, defSize, warnings);
+    ox = P.side === 'left' ? P.pw : 0; oy = P.side === 'top' ? P.ph : 0;
+    CW = P.horizontal ? cw + P.pw : cw; CH = P.horizontal ? Math.max(ch, P.contentH) : ch + P.ph;
+    const px0 = P.side === 'right' ? cw : 0, py0 = P.side === 'bottom' ? ch : 0;
+    const divider = P.side === 'right' ? '<line x1="' + cw + '" y1="0" x2="' + cw + '" y2="' + CH + '"' : P.side === 'left' ? '<line x1="' + P.pw + '" y1="0" x2="' + P.pw + '" y2="' + CH + '"'
+      : P.side === 'top' ? '<line x1="0" y1="' + P.ph + '" x2="' + CW + '" y2="' + P.ph + '"' : '<line x1="0" y1="' + ch + '" x2="' + CW + '" y2="' + ch + '"';
+    bg = '<rect width="' + CW + '" height="' + CH + '" fill="' + P.color + '"/>';
+    panelSvg = divider + ' stroke="#c9c9cf" stroke-width="2"/><g transform="translate(' + px0 + ',' + py0 + ')">' + P.svg + '</g>';
+  }
+  if (CW * CH > 120e6) throw new Error('결과 이미지가 너무 큽니다: ' + CW + 'x' + CH);
+  const b64 = buf.toString('base64'), tr = 'translate(' + (ox - cx) + ',' + (oy - cy) + ')';
+  const svg = '<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="' + CW + '" height="' + CH + '" viewBox="0 0 ' + CW + ' ' + CH + '">' + bg +
+    '<clipPath id="nlclip"><rect x="' + ox + '" y="' + oy + '" width="' + cw + '" height="' + ch + '"/></clipPath>' +
+    '<g clip-path="url(#nlclip)"><g transform="' + tr + '"><image x="0" y="0" width="' + W + '" height="' + H + '" xlink:href="data:' + info.mime + ';base64,' + b64 + '"/></g></g>' +
+    '<g transform="' + tr + '">' + out.join('') + '</g>' + panelSvg + '</svg>';
+  return { svg, width: CW, height: CH, count: items.length, warnings };
 }
 
 function annotate(buf, spec) {
@@ -151,4 +251,4 @@ function annotate(buf, spec) {
   return { png: img.asPng(), width: img.width, height: img.height, count: built.count, warnings: built.warnings, source: { w: info.w, h: info.h } };
 }
 
-module.exports = { annotate, buildSvg, imageInfo, MAX_ITEMS };
+module.exports = { annotate, buildSvg, imageInfo, wrapText, MAX_ITEMS };
