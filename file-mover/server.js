@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 'use strict';
-// 노드랩 파일 이동기 MCP v1.4 — PC에서 실행. 도구 7개: file_stat, send_file, receive_file, delete_path, receive_bytes, capture_screen, annotate_image
+// 노드랩 파일 이동기 MCP v1.5 — PC에서 실행. 도구 7개: file_stat, send_file, receive_file, delete_path, receive_bytes, capture_screen, annotate_image
+// 변경점(v1.4 대비): capture_screen에 window(창 제목·프로그램 이름으로 창 하나만 찍기, 가려진 창은 PrintWindow, 최소화는 restore일 때만 복원)와 info_only+windows(열린 창 목록) 추가. 기존 동작 그대로.
 // 변경점(v1.3 대비): annotate_image에 panel(코멘트란) 추가 — 캔버스를 넓혀 제목·번호 코멘트를 적음. number 번호 자동 매김 보정. 나머지 동작 그대로.
 // 변경점(v1.2 대비): capture_screen(PC 화면을 PNG 파일로, 기본 꺼짐 MOVER_ENABLE_CAPTURE=1), annotate_image(그림·글자 얹기, 자르기). 나머지 5개 도구는 동작 그대로.
 // 변경점(v1.1 대비): receive_bytes 추가(화면이 보낸 파일 바이트를 허용 폴더에 씀, 나눠 보내기·sha256 확인 지원). 나머지 4개 도구는 동작 그대로.
@@ -12,7 +13,7 @@ const dns = require('dns').promises;
 const net = require('net');
 const crypto = require('crypto');
 
-const VERSION = '1.4.0';
+const VERSION = '1.5.0';
 const DEFAULT_HOSTS = ['figma.com', 'figma-alpha-api.s3.us-west-2.amazonaws.com', 'amazonaws.com',
   'adobe.io', 'adobe.com', 'adobelogin.com', 'cloudfront.net', 'behance.net'];
 
@@ -305,9 +306,19 @@ async function captureScreen(a, cfg) {
   assertWritable(dir, cfg);
   let delay = a.delay_ms === undefined ? 0 : Number(a.delay_ms);
   if (!Number.isFinite(delay) || delay < 0 || delay > 10000) throw new Error('delay_ms는 0~10000 입니다');
+  if (a.windows !== undefined && typeof a.windows !== 'boolean') throw new Error('windows는 true/false 입니다');
+  if (a.window !== undefined) {
+    capture.checkWindowSpec(a.window);
+    if (a.display !== undefined && a.display !== null && a.display !== '') throw new Error('[window_spec] window와 display는 함께 쓸 수 없습니다');
+    if (a.info_only !== true) return captureWindow(a, cfg, dir, delay);
+  }
   const info = await capture.runPs('info', {});
   const displays = capture.toArr(info.displays);
-  if (a.info_only === true) return { displays, virtual: info.virtual };
+  if (a.info_only === true) {
+    const r = { displays, virtual: info.virtual };
+    if (a.windows === true) r.windows = capture.windowsForReport(((await capture.runPs('win_list', {})) || {}).windows);   // 창 제목은 windows:true 로 물었을 때만 내보낸다
+    return r;
+  }
   const plan = capture.planRegion(info, a);   // 영역 계산은 찍기 전에 끝낸다(틀린 입력이면 아무것도 찍지 않음)
   const name = pngName(a.filename, 'capture_' + stampName() + '.png');
   fs.mkdirSync(dir, { recursive: true });
@@ -326,6 +337,40 @@ async function captureScreen(a, cfg) {
     const result = { saved_path: target, width: im.w, height: im.h, bytes: buf.length, display: plan.display, region_px: { x: plan.x, y: plan.y, w: plan.w, h: plan.h }, area_px: plan.area, displays };
     try { fs.appendFileSync(path.join(dir, 'capture_log.jsonl'), JSON.stringify({ at: new Date().toISOString(), file: path.basename(target), display: plan.display, region_px: result.region_px }) + '\n'); } catch {}
     log('capture', target, im.w + 'x' + im.h);
+    return result;
+  } catch (e) { try { fs.unlinkSync(part); } catch {} throw e; }
+}
+
+async function captureWindow(a, cfg, dir, delay) {
+  const w = a.window;
+  if (delay) await new Promise(r => setTimeout(r, delay));
+  const listed = await capture.runPs('win_list', {});
+  const { win, matched } = capture.planWindow(listed.windows, w);   // 못 찾음·여럿·최소화·다른 데스크톱은 여기서 찍기 전에 오류
+  const regionEnv = capture.planWindowRegion(a.region);
+  const procSlug = sanitizeName(String(win.process || 'window')).replace(/\.[^.]*$/, '') || 'window';
+  const name = pngName(a.filename, 'window_' + procSlug + '_' + stampName() + '.png');
+  fs.mkdirSync(dir, { recursive: true });
+  const target = uniqueTarget(dir, name, a.overwrite === true);
+  insideAllowed(target, cfg); assertWritable(target, cfg);
+  if (fs.existsSync(target) && fs.statSync(target).isDirectory()) throw new Error('같은 이름의 폴더가 있습니다: ' + target);
+  const part = target + '.part';
+  try {
+    const env = { CAP_HWND: String(win.hwnd), CAP_OUT: part, CAP_METHOD: w.method || 'auto', CAP_RESTORE: w.restore === true ? '1' : '0',
+      CAP_BACK: w.restore_back === false ? '0' : '1', CAP_ACTIVATE: w.activate === true ? '1' : '0', CAP_CLIENT: w.client_only === true ? '1' : '0',
+      CAP_SETTLE: String(w.settle_ms === undefined ? 500 : w.settle_ms), ...regionEnv };
+    const r = await capture.runPs('win_shot', env, 45000);
+    if (!r || r.ok !== true) throw capture.psFail(r || {});
+    const buf = fs.readFileSync(part);
+    const im = require('./annotate.js').imageInfo(buf);
+    if (im.type !== 'png') throw new Error('캡처 결과가 PNG가 아닙니다');
+    fs.renameSync(part, target);
+    const warnings = capture.toArr(r.warnings);
+    if (matched > 1) warnings.push('matched_' + matched + '_windows');
+    const result = { saved_path: target, width: im.w, height: im.h, bytes: buf.length, window: { title: win.title, process: win.process, pid: win.pid },
+      method_used: r.method, fallback: r.fallback === true, occluded_ratio: r.occluded_ratio === undefined ? null : r.occluded_ratio,
+      restored: r.restored === true, activated: r.activated === true, region_px: r.region, area_px: { w: r.area_w, h: r.area_h }, warnings };
+    try { fs.appendFileSync(path.join(dir, 'capture_log.jsonl'), JSON.stringify({ at: new Date().toISOString(), file: path.basename(target), window_process: win.process, method: r.method, region_px: r.region }) + '\n'); } catch {}   // 로그에는 창 제목을 남기지 않는다
+    log('capture window', target, im.w + 'x' + im.h, win.process);
     return result;
   } catch (e) { try { fs.unlinkSync(part); } catch {} throw e; }
 }
@@ -369,10 +414,14 @@ const TOOLS = [
   { name: 'receive_bytes', description: '호출자가 base64 글자(content_base64)로 보낸 파일 바이트를 허용 폴더에 파일로 쓴다(화면·아티팩트가 PC에 파일을 직접 넘길 때). 같은 이름이 있으면 _1,_2를 붙여 보존(overwrite:true면 덮어씀). 큰 파일은 순서대로 나눠 보낸다: offset(0부터, 이어 받은 크기와 같아야 함)과 total_bytes(전체 크기)를 매번 같이 보내고, 마지막 조각이 오면 done:true와 saved_path·sha256을 돌려준다. sha256을 주면 전송 중 깨짐을 확인. agent·file-mover·_trash 안에는 쓸 수 없다.',
     inputSchema: { type: 'object', properties: { dest_dir: { type: 'string' }, filename: { type: 'string' }, content_base64: { type: 'string' },
       overwrite: { type: 'boolean' }, offset: { type: 'integer' }, total_bytes: { type: 'integer' }, sha256: { type: 'string' } }, required: ['dest_dir', 'filename', 'content_base64'] } },
-  { name: 'capture_screen', description: 'PC 화면(전체·모니터 하나·일부 영역)을 PNG 파일로 허용 폴더에 저장한다. 브라우저를 거치지 않는 OS 화면 캡처(Windows). 기본은 꺼져 있고 env MOVER_ENABLE_CAPTURE=1일 때만 작동. 인자: dest_dir(기본 <첫 허용 폴더>\\capture), filename(기본 capture_날짜시각.png), display("all"=모든 모니터 또는 모니터 번호 1~), region{x,y,w,h,units}(고른 화면 왼쪽 위가 0, units 기본 "ratio"=0~1 비율, "px"=픽셀), delay_ms(찍기 전에 기다림, 최대 10000), info_only:true면 찍지 않고 모니터 목록만 돌려줌. 같은 이름이 있으면 _1,_2. 찍은 뒤 saved_path를 nodelab-fs read_media_file로 열어 보면 눈으로 확인할 수 있다. 찍을 때마다 dest_dir\\capture_log.jsonl에 기록.',
+  { name: 'capture_screen', description: 'PC 화면(전체·모니터 하나·일부 영역)을 PNG 파일로 허용 폴더에 저장한다. 브라우저를 거치지 않는 OS 화면 캡처(Windows). 기본은 꺼져 있고 env MOVER_ENABLE_CAPTURE=1일 때만 작동. 인자: dest_dir(기본 <첫 허용 폴더>\\capture), filename(기본 capture_날짜시각.png), display("all"=모든 모니터 또는 모니터 번호 1~), region{x,y,w,h,units}(고른 화면 왼쪽 위가 0, units 기본 "ratio"=0~1 비율, "px"=픽셀), delay_ms(찍기 전에 기다림, 최대 10000), info_only:true면 찍지 않고 모니터 목록만 돌려줌. 같은 이름이 있으면 _1,_2. 찍은 뒤 saved_path를 nodelab-fs read_media_file로 열어 보면 눈으로 확인할 수 있다. 찍을 때마다 dest_dir\\capture_log.jsonl에 기록. ' +
+    '창 하나만 찍기(v1.5): window{title(창 제목 일부, 대소문자 무시), process(프로그램 이름, 예 whale), match(contains 기본|exact), index(여러 개일 때 번호), pick(error 기본|topmost|largest), method(auto 기본=PrintWindow로 가려져도 찍고 실패하면 화면 복사|print|screen), restore(최소화된 창을 잠깐 펼쳐 찍기, 기본 false), restore_back(찍은 뒤 다시 최소화, 기본 true), activate(앞으로 가져오기, 기본 false), client_only(제목줄·테두리 제외), settle_ms}. display와 함께 쓸 수 없고 region은 그 창 안 기준. 실패 코드: [window_not_found] [window_ambiguous](후보 목록을 돌려줌) [window_minimized] [window_cloaked](다른 가상 데스크톱) [window_blank] [window_empty] [region_outside]. 열린 창 제목 목록은 info_only:true + windows:true 로만 나온다(로그에는 제목을 남기지 않음). 브라우저 창은 화면 배율이 다른 모니터에서 크기가 달라 보일 수 있다.',
     inputSchema: { type: 'object', properties: { dest_dir: { type: 'string' }, filename: { type: 'string' }, display: { type: ['string', 'integer'] },
       region: { type: 'object', properties: { x: { type: 'number' }, y: { type: 'number' }, w: { type: 'number' }, h: { type: 'number' }, units: { type: 'string', enum: ['ratio', 'px'] } }, required: ['x', 'y', 'w', 'h'] },
-      delay_ms: { type: 'integer' }, overwrite: { type: 'boolean' }, info_only: { type: 'boolean' } } } },
+      delay_ms: { type: 'integer' }, overwrite: { type: 'boolean' }, info_only: { type: 'boolean' }, windows: { type: 'boolean' },
+      window: { type: 'object', properties: { title: { type: 'string' }, process: { type: 'string' }, match: { type: 'string', enum: ['contains', 'exact'] }, index: { type: 'integer' },
+        pick: { type: 'string', enum: ['error', 'topmost', 'largest'] }, method: { type: 'string', enum: ['auto', 'print', 'screen'] }, restore: { type: 'boolean' }, restore_back: { type: 'boolean' },
+        activate: { type: 'boolean' }, client_only: { type: 'boolean' }, settle_ms: { type: 'integer' } } } } } },
   { name: 'annotate_image', description: '허용 폴더 안 PNG/JPG 위에 그림·글자를 얹어 새 PNG로 저장한다(원본은 그대로). items 배열에 아래 종류를 순서대로 쌓는다. 좌표 기본은 이미지 가로·세로 대비 비율(0~1), units:"px"면 픽셀. 색은 #e11d48, red, rgba(...). ' +
     'rect{x,y,w,h,color,width,fill,radius} · ellipse{x,y,w,h,color,width,fill} · line{x1,y1,x2,y2} · arrow{x1,y1,x2,y2}(끝에 화살촉) · text{x,y,text,size,color,bg,align,bold}(x,y는 글자 상자 왼쪽 위, \\n으로 줄바꿈, size 1 이하는 이미지 높이 비율, bg를 주면 글자 뒤 색 상자) · number{x,y,n,size,color}(번호 동그라미) · freehand{points:[[x,y],...],color,width} · highlight{x,y,w,h,color,opacity}(형광펜) · mask{x,y,w,h,color}(가리기, 기본 검정). ' +
     '공통: width(선 굵기), opacity(0~1). crop{x,y,w,h}로 일부만 잘라 내고, max_width로 줄여 저장. out_dir·out_filename 기본은 원본 옆 <이름>_annotated.png, 같은 이름이 있으면 _1,_2(overwrite:true여도 원본은 덮어쓰지 않음). 결과의 warnings에 이미지 밖에 놓인 항목이 나온다. ' +
