@@ -10,11 +10,10 @@ const SCRIPT_PATH = path.join(__dirname, 'capture.ps1');
 function runPs(mode, extraEnv, timeoutMs = 30000) {
   return new Promise((resolve, reject) => {
     if (process.platform !== 'win32' && !process.env.MOVER_POWERSHELL) return reject(new Error('화면 캡처는 Windows에서만 됩니다'));
-    let script;
-    try { script = fs.readFileSync(SCRIPT_PATH, 'utf8'); } catch (e) { return reject(new Error('capture.ps1을 읽지 못했습니다: ' + e.message)); }
-    const enc = Buffer.from(script, 'utf16le').toString('base64');
+    // 스크립트를 -EncodedCommand 로 넘기면 명령줄 한도(약 32K자)를 넘어 spawn ENAMETOOLONG 이 난다(v1.5.0 결함) → 파일로 실행. capture.ps1 은 ASCII만 쓴다.
+    if (!fs.existsSync(SCRIPT_PATH)) return reject(new Error('capture.ps1을 찾지 못했습니다: ' + SCRIPT_PATH));
     const exe = process.env.MOVER_POWERSHELL || 'powershell.exe';
-    const p = spawn(exe, ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', enc],
+    const p = spawn(exe, ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', SCRIPT_PATH],
       { env: { ...process.env, ...extraEnv, CAP_MODE: mode }, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
     let out = '', err = '', done = false;
     const t = setTimeout(() => { if (!done) { done = true; try { p.kill(); } catch {} reject(new Error('화면 캡처가 ' + timeoutMs / 1000 + '초 안에 끝나지 않았습니다')); } }, timeoutMs);

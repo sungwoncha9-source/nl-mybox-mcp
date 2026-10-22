@@ -70,7 +70,7 @@ const thrown = (f) => { try { f(); } catch (e) { return e; } return null; };
   const fake = path.join(base, 'fake-ps.js');
   fs.writeFileSync(fake, '#!/usr/bin/env node\n' + [
     "const fs=require('fs');",
-    "fs.appendFileSync(process.env.FAKE_LOG,JSON.stringify({mode:process.env.CAP_MODE,env:Object.fromEntries(Object.entries(process.env).filter(([k])=>k.startsWith('CAP_')))})+'\\n');",
+    "const a=process.argv.slice(2);fs.appendFileSync(process.env.FAKE_LOG,JSON.stringify({cmdLen:a.join(' ').length,viaFile:a.includes('-File')&&!a.includes('-EncodedCommand'),mode:process.env.CAP_MODE,env:Object.fromEntries(Object.entries(process.env).filter(([k])=>k.startsWith('CAP_')))})+'\\n');",
     "const mode=process.env.CAP_MODE,f=process.env.FAKE||'';",
     "if(mode==='info'){console.log(process.env.FAKE_INFO);}",
     "else if(mode==='win_list'){console.log(process.env.FAKE_WINS);}",
@@ -166,9 +166,12 @@ const thrown = (f) => { try { f(); } catch (e) { return e; } return null; };
   const cs = tl.find(t => t.name === 'capture_screen');
   rec('도구 목록: 7개 그대로, capture_screen 스키마에 window/windows', tl.length === 7 && cs.inputSchema.properties.window && cs.inputSchema.properties.windows && /window_ambiguous/.test(cs.description), tl.length);
   const init = await m.handle({ id: 1, method: 'initialize', params: {} }, cfg);
-  rec('버전 1.5.0', init.serverInfo.version === '1.5.0', init.serverInfo.version);
+  rec('버전 1.5.1', init.serverInfo.version === '1.5.1', init.serverInfo.version);
   const ps = fs.readFileSync(capture.SCRIPT_PATH, 'utf8');
   rec('capture.ps1: 네 모드가 모두 있음', ['info', 'shot', 'win_list', 'win_shot'].every(k => ps.includes("CAP_MODE -eq '" + k + "'")), '');
+  rec('capture.ps1: ASCII만 사용(-File 로 실행해도 코드페이지 영향 없음)', !/[^\x00-\x7F]/.test(ps), '');
+  rec('회귀(v1.5.0 ENAMETOOLONG): 스크립트를 명령줄에 싣지 않음 — 실제 호출 인자 길이 확인', (() => { const l = calls().filter(c => c.mode === 'win_list').pop(); return l && l.viaFile === true && l.cmdLen < 2000; })(), '');
+  rec('회귀: 옛 방식(UTF-16 base64)이었다면 윈도우 명령줄 한도 초과였음', Buffer.from(ps, 'utf16le').toString('base64').length > 32767, Buffer.from(ps, 'utf16le').toString('base64').length);
   rec('capture.ps1: UTF-8 출력 설정은 창 모드 한정', /isWinMode/.test(ps) && /OutputEncoding/.test(ps), '');
 
   fs.rmSync(base, { recursive: true, force: true });

@@ -1,10 +1,10 @@
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
-# 노드랩 파일 이동기 v1.5 화면 캡처. server.js(capture.js)가 환경변수로 일을 시키고 JSON 한 줄을 돌려받는다.
-#   CAP_MODE=info     : 모니터 목록과 전체 화면 크기를 출력
-#   CAP_MODE=shot     : CAP_X, CAP_Y, CAP_W, CAP_H(바탕화면 절대 픽셀)를 CAP_OUT 에 PNG로 저장
-#   CAP_MODE=win_list : 보이는 최상위 창 목록(앞에 있는 것부터)을 출력
-#   CAP_MODE=win_shot : CAP_HWND 창 하나를 CAP_OUT 에 PNG로 저장(가려진 창도 PrintWindow로, 최소화는 CAP_RESTORE=1일 때만 복원)
+# nodelab file-mover v1.5 screen capture. capture.js passes work via env vars and reads one JSON line back. ASCII only on purpose (run with -File).
+#   CAP_MODE=info     : print monitor list and virtual screen size
+#   CAP_MODE=shot     : save CAP_X,CAP_Y,CAP_W,CAP_H (absolute desktop px) to CAP_OUT as PNG
+#   CAP_MODE=win_list : print visible top-level windows (front first)
+#   CAP_MODE=win_shot : save window CAP_HWND to CAP_OUT as PNG (PrintWindow for occluded ones; minimized only restored when CAP_RESTORE=1)
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 Add-Type -TypeDefinition @'
@@ -48,11 +48,11 @@ public static class NlWin {
 
 $isWinMode = ($env:CAP_MODE -eq 'win_list') -or ($env:CAP_MODE -eq 'win_shot')
 if ($isWinMode) {
-  # 창 캡처: 모니터마다 배율이 달라도 창의 실제 픽셀 좌표를 얻도록 모니터별 DPI 인식(안 되면 기존 방식)
+  # per-monitor DPI awareness so window rects are real pixels (falls back to system-aware)
   $ok = $false
   try { $ok = [NlWin]::SetProcessDpiAwarenessContext([IntPtr]::new(-4)) } catch { }
   if (-not $ok) { [void][NlDpi]::SetProcessDPIAware() }
-  # 창 제목에 한글이 있으므로 출력을 UTF-8로(기본값은 지역 코드페이지라 글자가 깨진다)
+  # window titles can be non-ASCII: force UTF-8 stdout (default is the OEM code page)
   [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false)
 }
 else { [void][NlDpi]::SetProcessDPIAware() }
@@ -60,8 +60,8 @@ else { [void][NlDpi]::SetProcessDPIAware() }
 function Out-NlJson($o) { [Console]::Out.WriteLine(($o | ConvertTo-Json -Compress -Depth 6)) }
 
 #region NlRegion
-# 창 안의 일부 영역(region) 계산. server 쪽 capture.js planRegion 과 같은 규칙(시험으로 서로 맞춰 봄).
-# units: 'px' 또는 비율. 창 왼쪽 위가 0. 반환: x,y,w,h 또는 $null(영역이 창 밖).
+# region inside a window; same rules as planRegion in capture.js (cross-checked by tests).
+# units: 'px' or ratio. Window top-left is 0. Returns x,y,w,h or $null (outside the window).
 function Get-NlRegion($W, $H, $units, $rx, $ry, $rw, $rh) {
   if ($units -eq 'px') { $fx = $rx; $fy = $ry; $fw = $rw; $fh = $rh }
   else { $fx = $rx * $W; $fy = $ry * $H; $fw = $rw * $W; $fh = $rh * $H }
@@ -120,7 +120,7 @@ elseif ($env:CAP_MODE -eq 'win_list') {
     if ([NlWin]::IsWindowVisible($h)) {
       $title = [NlWin]::Title($h)
       $ex = [NlWin]::GetWindowLongW($h, -20)
-      $isTool = (($ex -band 0x80) -ne 0) -and (($ex -band 0x40000) -eq 0)   # 도구 창(작업 표시줄에 안 뜨는 보조 창) 제외
+      $isTool = (($ex -band 0x80) -ne 0) -and (($ex -band 0x40000) -eq 0)   # skip tool windows
       if ($title.Length -gt 0 -and -not $isTool) {
         $z++
         $procId = [uint32]0
@@ -159,7 +159,7 @@ elseif ($env:CAP_MODE -eq 'win_shot') {
   try {
     if ([NlWin]::IsIconic($hwnd)) {
       if ($env:CAP_RESTORE -ne '1') { Out-NlJson @{ ok = $false; code = 'window_minimized'; message = 'window is minimized' }; exit 0 }
-      [void][NlWin]::ShowWindow($hwnd, 4)          # SW_SHOWNOACTIVATE: 원래 크기로 되돌리되 앞으로 끌어오지는 않음
+      [void][NlWin]::ShowWindow($hwnd, 4)          # SW_SHOWNOACTIVATE: restore without taking focus
       $restored = $true
       for ($i = 0; $i -lt 20 -and [NlWin]::IsIconic($hwnd); $i++) { Start-Sleep -Milliseconds 100 }
       if ([NlWin]::IsIconic($hwnd)) { Out-NlJson @{ ok = $false; code = 'window_minimized'; message = 'restore failed' }; exit 0 }
@@ -199,7 +199,7 @@ elseif ($env:CAP_MODE -eq 'win_shot') {
         $cw = [Math]::Min($aw, $fw - $ox); $ch = [Math]::Min($ah, $fh - $oy)
         $cand = $full.Clone((New-Object System.Drawing.Rectangle($ox, $oy, $cw, $ch)), $full.PixelFormat)
         $full.Dispose()
-        # 전부 한 가지 색이면 그려지지 않은 것으로 본다
+        # a single flat color means nothing was drawn
         $first = $cand.GetPixel(0, 0); $varied = $false
         for ($gy = 0; $gy -lt 12 -and -not $varied; $gy++) {
           for ($gx = 0; $gx -lt 12; $gx++) {
@@ -253,7 +253,7 @@ elseif ($env:CAP_MODE -eq 'win_shot') {
     Out-NlJson @{ ok = $true; method = $used; fallback = $fallback; area_w = $iw; area_h = $ih; region = $regOut; occluded_ratio = $occ; restored = $restored; activated = $activated; warnings = @($warn) }
   }
   finally {
-    if ($restored -and $env:CAP_BACK -eq '1') { [void][NlWin]::ShowWindow($hwnd, 7) }   # SW_SHOWMINNOACTIVE: 다시 최소화
+    if ($restored -and $env:CAP_BACK -eq '1') { [void][NlWin]::ShowWindow($hwnd, 7) }   # SW_SHOWMINNOACTIVE: minimize again
   }
 }
 else { throw 'bad mode' }

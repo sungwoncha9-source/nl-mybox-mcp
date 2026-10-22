@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 'use strict';
 // 노드랩 파일 이동기 MCP v1.5 — PC에서 실행. 도구 7개: file_stat, send_file, receive_file, delete_path, receive_bytes, capture_screen, annotate_image
+// v1.5.1: PowerShell 스크립트를 -EncodedCommand 대신 -File 로 실행(v1.5.0은 명령줄 한도 초과로 capture_screen 전체가 spawn ENAMETOOLONG 실패 — 쓰지 말 것).
 // 변경점(v1.4 대비): capture_screen에 window(창 제목·프로그램 이름으로 창 하나만 찍기, 가려진 창은 PrintWindow, 최소화는 restore일 때만 복원)와 info_only+windows(열린 창 목록) 추가. 기존 동작 그대로.
 // 변경점(v1.3 대비): annotate_image에 panel(코멘트란) 추가 — 캔버스를 넓혀 제목·번호 코멘트를 적음. number 번호 자동 매김 보정. 나머지 동작 그대로.
 // 변경점(v1.2 대비): capture_screen(PC 화면을 PNG 파일로, 기본 꺼짐 MOVER_ENABLE_CAPTURE=1), annotate_image(그림·글자 얹기, 자르기). 나머지 5개 도구는 동작 그대로.
@@ -13,7 +14,7 @@ const dns = require('dns').promises;
 const net = require('net');
 const crypto = require('crypto');
 
-const VERSION = '1.5.0';
+const VERSION = '1.5.1';
 const DEFAULT_HOSTS = ['figma.com', 'figma-alpha-api.s3.us-west-2.amazonaws.com', 'amazonaws.com',
   'adobe.io', 'adobe.com', 'adobelogin.com', 'cloudfront.net', 'behance.net'];
 

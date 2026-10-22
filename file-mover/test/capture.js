@@ -60,9 +60,9 @@ const sizeOf = f => { const i = annotate.imageInfo(fs.readFileSync(f)); return i
   const fake = path.join(base, 'fake-ps.js');
   fs.writeFileSync(fake, '#!/usr/bin/env node\n' + [
     "const fs=require('fs');",
-    "const a=process.argv.slice(2);const enc=a[a.indexOf('-EncodedCommand')+1]||'';",
-    "const script=Buffer.from(enc,'base64').toString('utf16le');",
-    "fs.appendFileSync(process.env.FAKE_LOG||'/dev/null',JSON.stringify({mode:process.env.CAP_MODE,args:a.filter(x=>x!==enc),scriptOk:script===fs.readFileSync(process.env.FAKE_SCRIPT,'utf8')})+'\\n');",
+    "const a=process.argv.slice(2);const enc=a[a.indexOf('-File')+1]||'';",
+    "const script=fs.readFileSync(enc,'utf8');",
+    "fs.appendFileSync(process.env.FAKE_LOG||'/dev/null',JSON.stringify({mode:process.env.CAP_MODE,args:a.filter(x=>x!==enc),cmdLen:a.join(' ').length,viaFile:a.includes('-File')&&!a.includes('-EncodedCommand'),scriptOk:enc===process.env.FAKE_SCRIPT&&script===fs.readFileSync(process.env.FAKE_SCRIPT,'utf8')})+'\\n');",
     "const mode=process.env.CAP_MODE, f=process.env.FAKE;",
     "if(f==='hang'){setInterval(()=>{},1000);return;}",
     "if(f==='fail'){process.stderr.write('#< CLIXML\\n<Objs Version=\"1.1.0.1\"><S S=\"Error\">세션이 잠겨 있음_x000D__x000A_</S><S S=\"Error\">at line:1 &lt;x&gt;</S></Objs>');process.exit(1);}",
@@ -77,7 +77,7 @@ const sizeOf = f => { const i = annotate.imageInfo(fs.readFileSync(f)); return i
   Object.assign(process.env, { MOVER_POWERSHELL: fake, FAKE_LOG: log, FAKE_SCRIPT: capture.SCRIPT_PATH, FAKE_PNG_DIR: pngDir, FAKE_INFO: JSON.stringify(two) });
 
   let r = await capture.runPs('info', {});
-  rec('배선: info 호출 → JSON 결과, 스크립트가 글자 그대로 전달(UTF-16 인코딩)', r.displays.length === 2 && JSON.parse(fs.readFileSync(log, 'utf8').trim().split('\n')[0]).scriptOk === true, JSON.stringify(r).slice(0, 80));
+  rec('배선: info 호출 → JSON 결과, 스크립트는 -File 로 실행(명령줄 한도 안 걸림)', r.displays.length === 2 && (l0 => l0.scriptOk === true && l0.viaFile && l0.cmdLen < 1000)(JSON.parse(fs.readFileSync(log, 'utf8').trim().split('\n')[0])), JSON.stringify(r).slice(0, 80));
   const l0 = JSON.parse(fs.readFileSync(log, 'utf8').trim().split('\n')[0]);
   rec('배선: -NoProfile -NonInteractive -ExecutionPolicy Bypass 로 실행', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass'].every(x => l0.args.includes(x)), l0.args.join(' '));
   process.env.FAKE = 'hang';

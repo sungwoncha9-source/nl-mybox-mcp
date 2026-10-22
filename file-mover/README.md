@@ -14,7 +14,7 @@ v1.3부터는 PC 화면을 파일로 찍고(capture_screen) 그 위에 그림·�
   "env": { "MOVER_ALLOWED_DIRS": "D:\\nodelab_work" }
 }
 ```
-   (GitHub 로 받는 방식: `"command":"npx","args":["-y","-p","github:sungwoncha9-source/nl-mybox-mcp#add-file-mover","nl-file-mover"]` — 되돌릴 때는 `#add-file-mover` 대신 커밋으로 고정: v1.0 `#60b236e`, v1.1 `#3633235`, v1.2 `#50a78d9`, v1.3 `#291190b`, v1.4 `#25a2c61`)
+   (GitHub 로 받는 방식: `"command":"npx","args":["-y","-p","github:sungwoncha9-source/nl-mybox-mcp#add-file-mover","nl-file-mover"]` — 되돌릴 때는 `#add-file-mover` 대신 커밋으로 고정: v1.0 `#60b236e`, v1.1 `#3633235`, v1.2 `#50a78d9`, v1.3 `#291190b`, v1.4 `#25a2c61`; v1.5.0 `#f1043dc`는 capture_screen이 ENAMETOOLONG으로 깨져 쓰지 말 것)
    (npx는 같은 주소를 캐시해 두므로, 새 판을 받으려면 `#add-file-mover` 대신 새 커밋 번호를 적거나 npx 캐시 폴더 `%LOCALAPPDATA%\npm-cache\_npx`를 지우고 재시작)
 3. 클로드 데스크톱 재시작 → 새 대화에서 "file_stat 도구 보이는지" 확인.
 
