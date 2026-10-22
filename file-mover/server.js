@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 'use strict';
-// 노드랩 파일 이동기 MCP v1.2 — PC에서 실행. 도구 5개: file_stat, send_file, receive_file, delete_path, receive_bytes
+// 노드랩 파일 이동기 MCP v1.3 — PC에서 실행. 도구 7개: file_stat, send_file, receive_file, delete_path, receive_bytes, capture_screen, annotate_image
+// 변경점(v1.2 대비): capture_screen(PC 화면을 PNG 파일로, 기본 꺼짐 MOVER_ENABLE_CAPTURE=1), annotate_image(그림·글자 얹기, 자르기). 나머지 5개 도구는 동작 그대로.
 // 변경점(v1.1 대비): receive_bytes 추가(화면이 보낸 파일 바이트를 허용 폴더에 씀, 나눠 보내기·sha256 확인 지원). 나머지 4개 도구는 동작 그대로.
 // 변경점(v1.0 대비, v1.1): delete_path 추가(기본은 휴지통 폴더로 이동, permanent:true일 때만 영구 삭제).
 // 의존성 없음(Node 18+). 클로드는 "주소(URL)와 PC 경로"만 말하고, 파일 바이트는 이 프로그램이 직접 옮긴다.
@@ -10,7 +11,7 @@ const dns = require('dns').promises;
 const net = require('net');
 const crypto = require('crypto');
 
-const VERSION = '1.2.0';
+const VERSION = '1.3.0';
 const DEFAULT_HOSTS = ['figma.com', 'figma-alpha-api.s3.us-west-2.amazonaws.com', 'amazonaws.com',
   'adobe.io', 'adobe.com', 'adobelogin.com', 'cloudfront.net', 'behance.net'];
 
@@ -35,6 +36,7 @@ function makeConfig(env = process.env) {
     allowHttp: env.MOVER_ALLOW_HTTP === '1',       // 시험용
     allowPrivate: env.MOVER_ALLOW_PRIVATE === '1', // 시험용
     timeoutMs: Number(env.MOVER_TIMEOUT_MS || 120000),
+    captureEnabled: env.MOVER_ENABLE_CAPTURE === '1', // 화면 캡처는 기본 꺼짐(화면에 보이는 모든 것이 찍히므로)
   };
 }
 
@@ -278,6 +280,78 @@ async function receiveBytes(a, cfg) {
   return { done: true, saved_path: target, bytes: size, sha256: sha, renamed: path.basename(target) !== name };
 }
 
+// ---------- 화면 캡처·그림 얹기 (v1.3 추가) ----------
+const capture = require('./capture.js');
+const stampName = () => { const d = new Date(), z = n => String(n).padStart(2, '0');
+  return d.getFullYear() + z(d.getMonth() + 1) + z(d.getDate()) + '-' + z(d.getHours()) + z(d.getMinutes()) + z(d.getSeconds()); };
+function uniqueTarget(dir, name, overwrite) {
+  let target = path.join(dir, name);
+  if (!overwrite) { const ext = path.extname(name), base = path.basename(name, ext); let i = 1;
+    while (fs.existsSync(target)) target = path.join(dir, base + '_' + (i++) + ext); }
+  return target;
+}
+function pngName(n, fallback) {
+  let name = sanitizeName(n || fallback);
+  if (!/\.png$/i.test(name)) name = name.replace(/\.(jpe?g|bmp|gif|webp)$/i, '') + '.png';
+  if (/\.part$/i.test(name)) throw new Error('.part로 끝나는 이름은 쓸 수 없습니다');
+  return name;
+}
+
+async function captureScreen(a, cfg) {
+  if (!cfg.captureEnabled) throw new Error('화면 캡처가 꺼져 있습니다. 이 PC의 file-mover 설정 env에 MOVER_ENABLE_CAPTURE=1 을 넣고 다시 시작해야 합니다 (화면에 보이는 모든 것이 찍히므로 기본은 꺼 둡니다)');
+  a = a || {};
+  const dir = insideAllowed(a.dest_dir || path.join(cfg.dirs[0], 'capture'), cfg);
+  assertWritable(dir, cfg);
+  let delay = a.delay_ms === undefined ? 0 : Number(a.delay_ms);
+  if (!Number.isFinite(delay) || delay < 0 || delay > 10000) throw new Error('delay_ms는 0~10000 입니다');
+  const info = await capture.runPs('info', {});
+  const displays = capture.toArr(info.displays);
+  if (a.info_only === true) return { displays, virtual: info.virtual };
+  const plan = capture.planRegion(info, a);   // 영역 계산은 찍기 전에 끝낸다(틀린 입력이면 아무것도 찍지 않음)
+  const name = pngName(a.filename, 'capture_' + stampName() + '.png');
+  fs.mkdirSync(dir, { recursive: true });
+  const target = uniqueTarget(dir, name, a.overwrite === true);
+  insideAllowed(target, cfg); assertWritable(target, cfg);
+  if (fs.existsSync(target) && fs.statSync(target).isDirectory()) throw new Error('같은 이름의 폴더가 있습니다: ' + target);
+  const part = target + '.part';
+  if (delay) await new Promise(r => setTimeout(r, delay));
+  try {
+    await capture.runPs('shot', { CAP_X: String(plan.x), CAP_Y: String(plan.y), CAP_W: String(plan.w), CAP_H: String(plan.h), CAP_OUT: part });
+    const buf = fs.readFileSync(part);
+    const im = require('./annotate.js').imageInfo(buf);
+    if (im.type !== 'png') throw new Error('캡처 결과가 PNG가 아닙니다');
+    if (im.w !== plan.w || im.h !== plan.h) log('capture size differs', im.w + 'x' + im.h, 'plan', plan.w + 'x' + plan.h);
+    fs.renameSync(part, target);
+    const result = { saved_path: target, width: im.w, height: im.h, bytes: buf.length, display: plan.display, region_px: { x: plan.x, y: plan.y, w: plan.w, h: plan.h }, area_px: plan.area, displays };
+    try { fs.appendFileSync(path.join(dir, 'capture_log.jsonl'), JSON.stringify({ at: new Date().toISOString(), file: path.basename(target), display: plan.display, region_px: result.region_px }) + '\n'); } catch {}
+    log('capture', target, im.w + 'x' + im.h);
+    return result;
+  } catch (e) { try { fs.unlinkSync(part); } catch {} throw e; }
+}
+
+async function annotateImage(a, cfg) {
+  if (!a || typeof a.path !== 'string' || !a.path.trim()) throw new Error('path(원본 이미지)가 필요합니다');
+  const real = insideAllowed(a.path, cfg);
+  const st = fs.statSync(real);
+  if (!st.isFile()) throw new Error('파일이 아닙니다');
+  if (st.size > cfg.maxBytes) throw new Error('크기 한도 초과: ' + st.size + ' > ' + cfg.maxBytes);
+  const outDir = insideAllowed(a.out_dir || path.dirname(real), cfg);
+  assertWritable(outDir, cfg);
+  const base = path.basename(real, path.extname(real));
+  const name = pngName(a.out_filename, base + '_annotated.png');
+  const spec = { items: a.items, units: a.units, crop: a.crop, max_width: a.max_width };
+  const r = require('./annotate.js').annotate(fs.readFileSync(real), spec); // 입력 검사·그리기를 먼저 끝내고 그 뒤에만 파일을 만든다
+  fs.mkdirSync(outDir, { recursive: true });
+  const target = uniqueTarget(outDir, name, a.overwrite === true);
+  insideAllowed(target, cfg); assertWritable(target, cfg);
+  if (norm(target) === norm(real)) throw new Error('원본 파일은 덮어쓰지 않습니다. out_filename을 다르게 주세요');
+  if (fs.existsSync(target) && fs.statSync(target).isDirectory()) throw new Error('같은 이름의 폴더가 있습니다: ' + target);
+  const part = target + '.part';
+  try { fs.writeFileSync(part, r.png); fs.renameSync(part, target); } catch (e) { try { fs.unlinkSync(part); } catch {} throw e; }
+  log('annotate', target, r.width + 'x' + r.height, r.count + ' items');
+  return { saved_path: target, width: r.width, height: r.height, bytes: r.png.length, items: r.count, source: { path: real, width: r.source.w, height: r.source.h }, warnings: r.warnings };
+}
+
 // ---------- MCP(stdio) ----------
 const TOOLS = [
   { name: 'file_stat', description: '허용 폴더 안 PC 파일의 크기·형식을 알려준다. (어도비 업로드 시작 시 file_size/media_type 확인용)',
@@ -294,8 +368,17 @@ const TOOLS = [
   { name: 'receive_bytes', description: '호출자가 base64 글자(content_base64)로 보낸 파일 바이트를 허용 폴더에 파일로 쓴다(화면·아티팩트가 PC에 파일을 직접 넘길 때). 같은 이름이 있으면 _1,_2를 붙여 보존(overwrite:true면 덮어씀). 큰 파일은 순서대로 나눠 보낸다: offset(0부터, 이어 받은 크기와 같아야 함)과 total_bytes(전체 크기)를 매번 같이 보내고, 마지막 조각이 오면 done:true와 saved_path·sha256을 돌려준다. sha256을 주면 전송 중 깨짐을 확인. agent·file-mover·_trash 안에는 쓸 수 없다.',
     inputSchema: { type: 'object', properties: { dest_dir: { type: 'string' }, filename: { type: 'string' }, content_base64: { type: 'string' },
       overwrite: { type: 'boolean' }, offset: { type: 'integer' }, total_bytes: { type: 'integer' }, sha256: { type: 'string' } }, required: ['dest_dir', 'filename', 'content_base64'] } },
+  { name: 'capture_screen', description: 'PC 화면(전체·모니터 하나·일부 영역)을 PNG 파일로 허용 폴더에 저장한다. 브라우저를 거치지 않는 OS 화면 캡처(Windows). 기본은 꺼져 있고 env MOVER_ENABLE_CAPTURE=1일 때만 작동. 인자: dest_dir(기본 <첫 허용 폴더>\\capture), filename(기본 capture_날짜시각.png), display("all"=모든 모니터 또는 모니터 번호 1~), region{x,y,w,h,units}(고른 화면 왼쪽 위가 0, units 기본 "ratio"=0~1 비율, "px"=픽셀), delay_ms(찍기 전에 기다림, 최대 10000), info_only:true면 찍지 않고 모니터 목록만 돌려줌. 같은 이름이 있으면 _1,_2. 찍은 뒤 saved_path를 nodelab-fs read_media_file로 열어 보면 눈으로 확인할 수 있다. 찍을 때마다 dest_dir\\capture_log.jsonl에 기록.',
+    inputSchema: { type: 'object', properties: { dest_dir: { type: 'string' }, filename: { type: 'string' }, display: { type: ['string', 'integer'] },
+      region: { type: 'object', properties: { x: { type: 'number' }, y: { type: 'number' }, w: { type: 'number' }, h: { type: 'number' }, units: { type: 'string', enum: ['ratio', 'px'] } }, required: ['x', 'y', 'w', 'h'] },
+      delay_ms: { type: 'integer' }, overwrite: { type: 'boolean' }, info_only: { type: 'boolean' } } } },
+  { name: 'annotate_image', description: '허용 폴더 안 PNG/JPG 위에 그림·글자를 얹어 새 PNG로 저장한다(원본은 그대로). items 배열에 아래 종류를 순서대로 쌓는다. 좌표 기본은 이미지 가로·세로 대비 비율(0~1), units:"px"면 픽셀. 색은 #e11d48, red, rgba(...). ' +
+    'rect{x,y,w,h,color,width,fill,radius} · ellipse{x,y,w,h,color,width,fill} · line{x1,y1,x2,y2} · arrow{x1,y1,x2,y2}(끝에 화살촉) · text{x,y,text,size,color,bg,align,bold}(x,y는 글자 상자 왼쪽 위, \\n으로 줄바꿈, size 1 이하는 이미지 높이 비율, bg를 주면 글자 뒤 색 상자) · number{x,y,n,size,color}(번호 동그라미) · freehand{points:[[x,y],...],color,width} · highlight{x,y,w,h,color,opacity}(형광펜) · mask{x,y,w,h,color}(가리기, 기본 검정). ' +
+    '공통: width(선 굵기), opacity(0~1). crop{x,y,w,h}로 일부만 잘라 내고, max_width로 줄여 저장. out_dir·out_filename 기본은 원본 옆 <이름>_annotated.png, 같은 이름이 있으면 _1,_2(overwrite:true여도 원본은 덮어쓰지 않음). 결과의 warnings에 이미지 밖에 놓인 항목이 나온다. 저장 뒤 saved_path를 read_media_file로 열어 확인할 것.',
+    inputSchema: { type: 'object', properties: { path: { type: 'string' }, items: { type: 'array', items: { type: 'object' } }, units: { type: 'string', enum: ['ratio', 'px'] },
+      crop: { type: 'object' }, max_width: { type: 'integer' }, out_dir: { type: 'string' }, out_filename: { type: 'string' }, overwrite: { type: 'boolean' } }, required: ['path'] } },
 ];
-const IMPL = { file_stat: fileStat, send_file: sendFile, receive_file: receiveFile, delete_path: deletePath, receive_bytes: receiveBytes };
+const IMPL = { file_stat: fileStat, send_file: sendFile, receive_file: receiveFile, delete_path: deletePath, receive_bytes: receiveBytes, capture_screen: captureScreen, annotate_image: annotateImage };
 
 async function handle(msg, cfg) {
   const { id, method, params } = msg;
@@ -332,4 +415,4 @@ function main() {
   });
 }
 if (require.main === module) main();
-module.exports = { makeConfig, fileStat, sendFile, receiveFile, deletePath, receiveBytes, checkUrl, handle };
+module.exports = { makeConfig, fileStat, sendFile, receiveFile, deletePath, receiveBytes, captureScreen, annotateImage, checkUrl, handle };

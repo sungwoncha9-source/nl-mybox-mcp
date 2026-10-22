@@ -1,6 +1,6 @@
 {
   "name": "nl-mybox-mcp",
-  "version": "1.2.0",
+  "version": "1.3.0",
   "description": "노드랩 수정판 Naver MYBOX Open API MCP 서버 (원본: minking/mybox-mcp, MIT)",
   "type": "module",
   "bin": {
@@ -13,8 +13,14 @@
     "file-mover/README.md",
     "file-mover/package.json",
     "file-mover/server.js",
+    "file-mover/annotate.js",
+    "file-mover/capture.js",
+    "file-mover/capture.ps1",
     "mybox-mcp.mjs",
     "src"
   ],
-  "license": "MIT"
+  "license": "MIT",
+  "optionalDependencies": {
+    "@resvg/resvg-js": "2.6.2"
+  }
 }
