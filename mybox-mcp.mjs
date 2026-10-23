@@ -54202,6 +54202,9 @@ function checkName(n) {
 var resultPath = (id) => path.join(jobsRoot(), "_results", id + ".json");
 var stagePath = (id) => path.join(jobsRoot(), id);
 var mem = /* @__PURE__ */ new Map();
+var running = /* @__PURE__ */ new Map();
+var WAIT_MAX_MS = 12e4;
+var FINAL = /* @__PURE__ */ new Set(["done", "dry_run_done", "failed"]);
 function save(st) {
   st.updated = (/* @__PURE__ */ new Date()).toISOString();
   fs.mkdirSync(path.dirname(resultPath(st.job_id)), { recursive: true });
@@ -54294,10 +54297,25 @@ function summary(st) {
       verified: st.files[n].verified ?? null,
       error: st.files[n].error ?? null
     })),
-    error: st.error ?? null
+    error: st.error ?? null,
+    final: FINAL.has(st.state)
   };
 }
-function putChunk(a, uploader) {
+async function waitFinal(id, waitMs) {
+  const p = running.get(id);
+  const t0 = Date.now();
+  if (!p || waitMs <= 0) return { waited_ms: 0, wait_timed_out: false };
+  let timer;
+  const timedOut = await Promise.race([
+    p.then(() => false, () => false),
+    new Promise((r) => {
+      timer = setTimeout(() => r(true), waitMs);
+    })
+  ]);
+  if (timer) clearTimeout(timer);
+  return { waited_ms: Date.now() - t0, wait_timed_out: timedOut };
+}
+async function putChunk(a, uploader) {
   sweepStale();
   if (!ID_RE.test(a.job_id || "")) throw new Error("job_id\uB294 \uC601\uBB38\xB7\uC22B\uC790\xB7_\xB7- 1~64\uC790\uC5EC\uC57C \uD569\uB2C8\uB2E4");
   if (!Array.isArray(a.files) || a.files.length < 1 || a.files.length > LIMITS.maxFiles) throw new Error("files\uB294 1~" + LIMITS.maxFiles + "\uAC1C\uC5EC\uC57C \uD569\uB2C8\uB2E4");
@@ -54319,6 +54337,9 @@ function putChunk(a, uploader) {
   const buf = Buffer.from(b64, "base64");
   if (buf.length === 0 || buf.length > LIMITS.maxChunk) throw new Error("\uC870\uAC01 \uD06C\uAE30\uB294 1\uBC14\uC774\uD2B8~1MiB\uC5EC\uC57C \uD569\uB2C8\uB2E4: " + buf.length);
   if (!Number.isInteger(a.offset) || a.offset < 0 || a.offset + buf.length > spec.size) throw new Error("offset+\uC870\uAC01 \uD06C\uAE30\uAC00 \uD30C\uC77C \uD06C\uAE30\uB97C \uB118\uC2B5\uB2C8\uB2E4");
+  if (!a.dry_run && !(typeof a.parent_id === "string" && a.parent_id.trim())) throw new Error("parent_id\uAC00 \uD544\uC694\uD569\uB2C8\uB2E4(1.7.0\uBD80\uD130 MYBOX \uB8E8\uD2B8\uB85C \uC62C\uB9AC\uC9C0 \uC54A\uC2B5\uB2C8\uB2E4). dry_run\uC774\uBA74 \uC0DD\uB7B5 \uAC00\uB2A5");
+  const waitMs = a.wait_ms == null ? 0 : a.wait_ms;
+  if (!Number.isInteger(waitMs) || waitMs < 0 || waitMs > WAIT_MAX_MS) throw new Error("wait_ms\uB294 0~" + WAIT_MAX_MS + " \uC815\uC218\uC5EC\uC57C \uD569\uB2C8\uB2E4");
   const opts = { parentId: a.parent_id, isOverwrite: a.is_overwrite, dryRun: a.dry_run, cleanup: a.cleanup };
   let st = load(a.job_id);
   if (!st) {
@@ -54338,7 +54359,8 @@ function putChunk(a, uploader) {
   const fs0 = st.files[a.file_name];
   if (st.state !== "receiving" || fs0.done) {
     save(st);
-    return { ...summary(st), accepted: false, note: st.state === "failed" ? "\uC77C\uAC10\uC774 \uC2E4\uD328\uD588\uAC70\uB098 \uB9CC\uB8CC\uB410\uC2B5\uB2C8\uB2E4(job_status\uC758 error \uCC38\uACE0) \u2014 \uC0C8 job_id\uB85C \uCC98\uC74C\uBD80\uD130 \uB2E4\uC2DC \uBCF4\uB0B4\uC138\uC694" : fs0.done ? "\uC774 \uD30C\uC77C\uC740 \uC774\uBBF8 \uB2E4 \uBC1B\uC558\uC2B5\uB2C8\uB2E4(\uC911\uBCF5 \uC870\uAC01\uC740 \uBB34\uC2DC)" : "\uC77C\uAC10\uC774 \uC774\uBBF8 \uB9C8\uBB34\uB9AC \uB2E8\uACC4\uC785\uB2C8\uB2E4" };
+    const w2 = st.state === "finalizing" ? await waitFinal(a.job_id, waitMs) : { waited_ms: 0, wait_timed_out: false };
+    return { ...summary(st), accepted: false, completed_by_this_call: false, ...w2, note: st.state === "failed" ? "\uC77C\uAC10\uC774 \uC2E4\uD328\uD588\uAC70\uB098 \uB9CC\uB8CC\uB410\uC2B5\uB2C8\uB2E4(job_status\uC758 error \uCC38\uACE0) \u2014 \uC0C8 job_id\uB85C \uCC98\uC74C\uBD80\uD130 \uB2E4\uC2DC \uBCF4\uB0B4\uC138\uC694" : fs0.done ? "\uC774 \uD30C\uC77C\uC740 \uC774\uBBF8 \uB2E4 \uBC1B\uC558\uC2B5\uB2C8\uB2E4(\uC911\uBCF5 \uC870\uAC01\uC740 \uBB34\uC2DC)" : "\uC77C\uAC10\uC774 \uC774\uBBF8 \uB9C8\uBB34\uB9AC \uB2E8\uACC4\uC785\uB2C8\uB2E4" };
   }
   const dir = stagePath(a.job_id);
   fs.mkdirSync(dir, { recursive: true });
@@ -54377,8 +54399,11 @@ function putChunk(a, uploader) {
     st.staged_dir = dir;
   }
   save(st);
-  if (allDone) void finalize2(st, uploader);
-  return { ...summary(st), accepted: true };
+  if (!allDone) return { ...summary(st), accepted: true, completed_by_this_call: false, waited_ms: 0, wait_timed_out: false };
+  const p = finalize2(st, uploader).finally(() => running.delete(a.job_id));
+  running.set(a.job_id, p);
+  const w = await waitFinal(a.job_id, waitMs);
+  return { ...summary(st), accepted: true, completed_by_this_call: true, ...w };
 }
 async function finalize2(st, uploader) {
   const dir = stagePath(st.job_id), o = st.spec.opts;
@@ -54412,11 +54437,20 @@ async function finalize2(st, uploader) {
   save(st);
 }
 function jobStatus(id) {
-  sweepStale();
   if (!ID_RE.test(id || "")) throw new Error("job_id\uAC00 \uC62C\uBC14\uB974\uC9C0 \uC54A\uC2B5\uB2C8\uB2E4");
   const st = load(id);
-  if (!st) return { job_id: id, state: "unknown", note: "\uC774 job_id\uC758 \uAE30\uB85D\uC774 \uC5C6\uC2B5\uB2C8\uB2E4" };
-  return { ...summary(st), created: st.created, updated: st.updated, staged_dir: st.staged_dir ?? null };
+  if (!st) return { job_id: id, state: "unknown", final: false, note: "\uC774 job_id\uC758 \uAE30\uB85D\uC774 \uC5C6\uC2B5\uB2C8\uB2E4" };
+  const base = { ...summary(st), created: st.created, updated: st.updated, staged_dir: st.staged_dir ?? null };
+  if ((st.state === "receiving" || st.state === "finalizing" && !running.has(id)) && Date.now() - Date.parse(st.updated) >= idleSeconds() * 1e3) {
+    return {
+      ...base,
+      state: "failed",
+      final: true,
+      cleanup_pending: true,
+      error: st.state === "receiving" ? "timeout: " + Math.round(idleSeconds()) + "\uCD08 \uB118\uAC8C \uC870\uAC01\uC774 \uC624\uC9C0 \uC54A\uC544 \uBA48\uCD98 \uC77C\uAC10\uC785\uB2C8\uB2E4(\uC815\uB9AC \uB300\uAE30 \uC911). \uC0C8 job_id\uB85C \uCC98\uC74C\uBD80\uD130 \uB2E4\uC2DC \uBCF4\uB0B4\uC138\uC694" : "interrupted: \uB9C8\uBB34\uB9AC \uB3C4\uC911 \uD504\uB85C\uADF8\uB7A8\uC774 \uBA48\uCD98 \uAC83\uC73C\uB85C \uBCF4\uC785\uB2C8\uB2E4. PC \uC0AC\uBCF8\uC740 \uC9C0\uC6B0\uC9C0 \uC54A\uACE0 \uB0A8\uAE41\uB2C8\uB2E4"
+    };
+  }
+  return base;
 }
 setInterval(() => {
   try {
@@ -54614,21 +54648,28 @@ var jobUploader = {
 };
 server.tool(
   "job_put_chunk",
-  "\uC77C\uAC10 \uC870\uAC01 \uD558\uB098\uB97C \uBC1B\uB294\uB2E4. \uC870\uAC01\uC740 \uC5B4\uB5A4 \uC21C\uC11C\uB85C \uBA87 \uAC1C\uAC00 \uB3D9\uC2DC\uC5D0 \uC640\uB3C4 \uB41C\uB2E4(\uAC19\uC740 \uC870\uAC01\uC744 \uB2E4\uC2DC \uBCF4\uB0B4\uB3C4 \uC548\uC804). \uBAA8\uB4E0 \uD30C\uC77C\uC774 \uB2E4 \uBAA8\uC774\uBA74 PC\uAC00 \uC2A4\uC2A4\uB85C \uC62C\uB9AC\uAE30\u2192\uD06C\uAE30 \uB300\uC870\u2192\uC815\uB9AC(_trash\uB85C \uC774\uB3D9)\uB97C \uD558\uACE0, \uC774 \uD638\uCD9C\uC740 \uAE30\uB2E4\uB9AC\uC9C0 \uC54A\uACE0 \uBC14\uB85C \uB2F5\uD55C\uB2E4. \uBAA8\uB4E0 \uD638\uCD9C\uC5D0 \uAC19\uC740 job_id\uC640 files(\uC774\uB984\xB7\uD06C\uAE30\xB7sha256)\uB97C \uC2E3\uB294\uB2E4. \uC870\uAC01\uC740 1MiB \uBBF8\uB9CC(base64 \uC804 \uC57D 760KB \uAD8C\uC7A5).",
+  "\uC77C\uAC10 \uC870\uAC01 \uD558\uB098\uB97C \uBC1B\uB294\uB2E4. \uC870\uAC01\uC740 \uC5B4\uB5A4 \uC21C\uC11C\uB85C \uBA87 \uAC1C\uAC00 \uB3D9\uC2DC\uC5D0 \uC640\uB3C4 \uB41C\uB2E4(\uAC19\uC740 \uC870\uAC01\uC744 \uB2E4\uC2DC \uBCF4\uB0B4\uB3C4 \uC548\uC804). \uBAA8\uB4E0 \uD30C\uC77C\uC774 \uB2E4 \uBAA8\uC774\uBA74 PC\uAC00 \uC2A4\uC2A4\uB85C \uC62C\uB9AC\uAE30\u2192\uD06C\uAE30 \uB300\uC870\u2192\uC815\uB9AC(_trash\uB85C \uC774\uB3D9)\uB97C \uD55C\uB2E4. wait_ms\uB97C \uC8FC\uBA74 \uC77C\uAC10\uC744 \uC644\uC131\uD55C \uD638\uCD9C(\uACFC \uB9C8\uBB34\uB9AC \uC911\uC5D0 \uB4E4\uC5B4\uC628 \uD638\uCD9C)\uC774 \uACB0\uACFC\uAE4C\uC9C0 \uCD5C\uB300 wait_ms \uAE30\uB2E4\uB838\uB2E4 \uB2F5\uD55C\uB2E4(final:true\uBA74 \uCD5C\uC885 \uACB0\uACFC, false\uBA74 \uC544\uC9C1 \uB9C8\uBB34\uB9AC \uC911). \uBAA8\uB4E0 \uD638\uCD9C\uC5D0 \uAC19\uC740 job_id\uC640 files(\uC774\uB984\xB7\uD06C\uAE30\xB7sha256)\uB97C \uC2E3\uB294\uB2E4. dry_run\uC774 \uC544\uB2C8\uBA74 parent_id \uD544\uC218. \uC870\uAC01\uC740 1MiB \uBBF8\uB9CC(base64 \uC804 \uC57D 760KB \uAD8C\uC7A5).",
   {
     job_id: external_exports.string().describe("\uC601\uBB38\xB7\uC22B\uC790\xB7_\xB7- 1~64\uC790"),
     files: external_exports.array(external_exports.object({ name: external_exports.string(), size: external_exports.number().int(), sha256: external_exports.string().describe("\uD30C\uC77C \uC804\uCCB4\uC758 sha256(16\uC9C4\uC218 64\uC790)") })).describe("\uC774 \uC77C\uAC10\uC758 \uC804\uCCB4 \uD30C\uC77C \uBAA9\uB85D"),
     file_name: external_exports.string().describe("\uC774 \uC870\uAC01\uC774 \uC18D\uD55C \uD30C\uC77C \uC774\uB984(files \uC548\uC5D0 \uC788\uC5B4\uC57C \uD568)"),
     offset: external_exports.number().int().describe("\uD30C\uC77C \uC548\uC5D0\uC11C \uC774 \uC870\uAC01\uC774 \uC2DC\uC791\uD558\uB294 \uBC14\uC774\uD2B8 \uC704\uCE58"),
     content_base64: external_exports.string(),
-    parent_id: external_exports.string().optional().describe("MYBOX \uC62C\uB9B4 \uD3F4\uB354 ID(\uC0DD\uB7B5 \uC2DC \uB8E8\uD2B8)"),
+    parent_id: external_exports.string().optional().describe("MYBOX \uC62C\uB9B4 \uD3F4\uB354 ID \u2014 dry_run\uC774 \uC544\uB2C8\uBA74 \uD544\uC218(\uB8E8\uD2B8\uB85C \uC62C\uB9AC\uC9C0 \uC54A\uC74C)"),
     is_overwrite: external_exports.boolean().optional(),
     dry_run: external_exports.boolean().optional().describe("true\uBA74 MYBOX\uC5D0\uB294 \uC62C\uB9AC\uC9C0 \uC54A\uACE0 PC\uC5D0\uC11C \uBAA8\uC73C\uAE30\xB7sha256 \uB300\uC870\uAE4C\uC9C0\uB9CC"),
-    cleanup: external_exports.enum(["trash", "keep"]).optional().describe("\uB9C8\uBB34\uB9AC \uB4A4 PC \uC0AC\uBCF8: trash(\uAE30\uBCF8, _trash\uB85C \uC774\uB3D9) / keep")
+    cleanup: external_exports.enum(["trash", "keep"]).optional().describe("\uB9C8\uBB34\uB9AC \uB4A4 PC \uC0AC\uBCF8: trash(\uAE30\uBCF8, _trash\uB85C \uC774\uB3D9) / keep"),
+    wait_ms: external_exports.number().int().optional().describe("0~120000. \uC774 \uD638\uCD9C\uC774 \uC77C\uAC10\uC744 \uC644\uC131\uD558\uBA74 \uB9C8\uBB34\uB9AC(\uC62C\uB9AC\uAE30\xB7\uB300\uC870) \uACB0\uACFC\uAE4C\uC9C0 \uCD5C\uB300 \uC774\uB9CC\uD07C \uAE30\uB2E4\uB838\uB2E4 \uB2F5\uD55C\uB2E4")
   },
-  async (args) => out(putChunk(args, jobUploader))
+  async (args) => out(await putChunk(args, jobUploader))
 );
-server.tool("job_status", "\uC77C\uAC10\uC758 \uC9C4\uD589\xB7\uB9C8\uBB34\uB9AC \uACB0\uACFC\uB97C \uC77D\uB294\uB2E4(\uC77D\uAE30 \uC804\uC6A9)", { job_id: external_exports.string() }, async (args) => out(jobStatus(args.job_id)));
+server.tool(
+  "job_status",
+  "\uC77C\uAC10\uC758 \uC9C4\uD589\xB7\uB9C8\uBB34\uB9AC \uACB0\uACFC\uB97C \uC77D\uB294\uB2E4(\uC77D\uAE30 \uC804\uC6A9)",
+  { job_id: external_exports.string() },
+  { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+  async (args) => out(jobStatus(args.job_id))
+);
 async function run() {
   const transport = new StdioServerTransport();
   await server.connect(transport);

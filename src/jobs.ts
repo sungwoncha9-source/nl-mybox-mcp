@@ -41,6 +41,10 @@ function checkName(n: string) {
 const resultPath = (id: string) => path.join(jobsRoot(), '_results', id + '.json');
 const stagePath = (id: string) => path.join(jobsRoot(), id);
 const mem = new Map<string, JobState>();
+/** 이 프로세스에서 마무리 중인 일감(기다리는 호출이 같은 약속을 함께 기다린다) */
+const running = new Map<string, Promise<void>>();
+export const WAIT_MAX_MS = 120000;
+const FINAL = new Set(['done', 'dry_run_done', 'failed']);
 
 function save(st: JobState) {
   st.updated = new Date().toISOString();
@@ -120,17 +124,35 @@ function summary(st: JobState) {
     files_done: names.filter(n => st.files[n].done).length,
     files: names.map(n => ({ name: n, size: st.files[n].size, received: receivedOf(st.files[n]), done: st.files[n].done,
       uploaded: st.files[n].uploaded ?? null, verified: st.files[n].verified ?? null, error: st.files[n].error ?? null })),
-    error: st.error ?? null
+    error: st.error ?? null,
+    final: FINAL.has(st.state)
   };
 }
 
 export type ChunkArgs = {
   job_id: string; files: FileSpec[]; file_name: string; offset: number; content_base64: string;
   parent_id?: string; is_overwrite?: boolean; dry_run?: boolean; cleanup?: 'trash' | 'keep';
+  /** 1.7.0: 이 호출이 일감을 완성하거나 이미 마무리 중이면, 마무리 결과가 나올 때까지 최대 wait_ms 기다렸다 답한다.
+   *  시간 안에 안 끝나면 그때의 상태(finalizing, final:false)를 그대로 돌려준다(완료로 꾸미지 않는다). 0/생략 = 기다리지 않음 */
+  wait_ms?: number;
 };
 
-/** 조각 하나를 받는다. 안쪽은 전부 동기 작업이라 동시에 여러 호출이 와도 서로 끼어들지 않는다. */
-export function putChunk(a: ChunkArgs, uploader: Uploader) {
+/** 마무리를 기다린다: 끝나면 바로, 아니면 wait_ms에서 멈춘다(어느 쪽이었는지 waited로 알린다) */
+async function waitFinal(id: string, waitMs: number): Promise<{ waited_ms: number; wait_timed_out: boolean }> {
+  const p = running.get(id); const t0 = Date.now();
+  if (!p || waitMs <= 0) return { waited_ms: 0, wait_timed_out: false };
+  let timer: NodeJS.Timeout | undefined;
+  const timedOut = await Promise.race([
+    p.then(() => false, () => false),
+    new Promise<boolean>(r => { timer = setTimeout(() => r(true), waitMs); })
+  ]);
+  if (timer) clearTimeout(timer);
+  return { waited_ms: Date.now() - t0, wait_timed_out: timedOut };
+}
+
+/** 조각 하나를 받는다. 기다리기 전까지의 안쪽은 전부 동기 작업이라 동시에 여러 호출이 와도 서로 끼어들지 않는다
+ *  (그래서 일감을 '다 모였다'로 바꾸는 호출은 정확히 하나다). */
+export async function putChunk(a: ChunkArgs, uploader: Uploader) {
   sweepStale();
   if (!ID_RE.test(a.job_id || '')) throw new Error('job_id는 영문·숫자·_·- 1~64자여야 합니다');
   if (!Array.isArray(a.files) || a.files.length < 1 || a.files.length > LIMITS.maxFiles) throw new Error('files는 1~' + LIMITS.maxFiles + '개여야 합니다');
@@ -151,6 +173,9 @@ export function putChunk(a: ChunkArgs, uploader: Uploader) {
   const buf = Buffer.from(b64, 'base64');
   if (buf.length === 0 || buf.length > LIMITS.maxChunk) throw new Error('조각 크기는 1바이트~1MiB여야 합니다: ' + buf.length);
   if (!Number.isInteger(a.offset) || a.offset < 0 || a.offset + buf.length > spec.size) throw new Error('offset+조각 크기가 파일 크기를 넘습니다');
+  if (!a.dry_run && !(typeof a.parent_id === 'string' && a.parent_id.trim())) throw new Error('parent_id가 필요합니다(1.7.0부터 MYBOX 루트로 올리지 않습니다). dry_run이면 생략 가능');
+  const waitMs = a.wait_ms == null ? 0 : a.wait_ms;
+  if (!Number.isInteger(waitMs) || waitMs < 0 || waitMs > WAIT_MAX_MS) throw new Error('wait_ms는 0~' + WAIT_MAX_MS + ' 정수여야 합니다');
 
   const opts: JobOpts = { parentId: a.parent_id, isOverwrite: a.is_overwrite, dryRun: a.dry_run, cleanup: a.cleanup };
   let st = load(a.job_id);
@@ -165,7 +190,8 @@ export function putChunk(a: ChunkArgs, uploader: Uploader) {
   const fs0 = st.files[a.file_name];
   if (st.state !== 'receiving' || fs0.done) {
     save(st);
-    return { ...summary(st), accepted: false, note: st.state === 'failed' ? '일감이 실패했거나 만료됐습니다(job_status의 error 참고) — 새 job_id로 처음부터 다시 보내세요' : fs0.done ? '이 파일은 이미 다 받았습니다(중복 조각은 무시)' : '일감이 이미 마무리 단계입니다' };
+    const w = st.state === 'finalizing' ? await waitFinal(a.job_id, waitMs) : { waited_ms: 0, wait_timed_out: false };
+    return { ...summary(st), accepted: false, completed_by_this_call: false, ...w, note: st.state === 'failed' ? '일감이 실패했거나 만료됐습니다(job_status의 error 참고) — 새 job_id로 처음부터 다시 보내세요' : fs0.done ? '이 파일은 이미 다 받았습니다(중복 조각은 무시)' : '일감이 이미 마무리 단계입니다' };
   }
   const dir = stagePath(a.job_id);
   fs.mkdirSync(dir, { recursive: true });
@@ -188,8 +214,12 @@ export function putChunk(a: ChunkArgs, uploader: Uploader) {
   const allDone = Object.values(st.files).every(f => f.done);
   if (allDone) { st.state = 'finalizing'; st.staged_dir = dir; }
   save(st);
-  if (allDone) void finalize(st, uploader); // 기다리지 않는다: 이 호출은 바로 답하고 마무리는 PC가 한다
-  return { ...summary(st), accepted: true };
+  if (!allDone) return { ...summary(st), accepted: true, completed_by_this_call: false, waited_ms: 0, wait_timed_out: false };
+  // 마무리는 PC가 한다. 화면이 연결을 끊어도 계속 진행된다. wait_ms가 있으면 이 호출이 결과까지 기다렸다 답한다.
+  const p = finalize(st, uploader).finally(() => running.delete(a.job_id));
+  running.set(a.job_id, p);
+  const w = await waitFinal(a.job_id, waitMs);
+  return { ...summary(st), accepted: true, completed_by_this_call: true, ...w };
 }
 
 export async function finalize(st: JobState, uploader: Uploader) {
@@ -221,12 +251,19 @@ export async function finalize(st: JobState, uploader: Uploader) {
   save(st);
 }
 
+/** 읽기만 한다(1.7.0: 만료 정리는 타이머와 job_put_chunk가 맡고 여기서는 하지 않는다 → 읽기 전용 표시) */
 export function jobStatus(id: string) {
-  sweepStale();
   if (!ID_RE.test(id || '')) throw new Error('job_id가 올바르지 않습니다');
   const st = load(id);
-  if (!st) return { job_id: id, state: 'unknown', note: '이 job_id의 기록이 없습니다' };
-  return { ...summary(st), created: st.created, updated: st.updated, staged_dir: st.staged_dir ?? null };
+  if (!st) return { job_id: id, state: 'unknown', final: false, note: '이 job_id의 기록이 없습니다' };
+  const base = { ...summary(st), created: st.created, updated: st.updated, staged_dir: st.staged_dir ?? null };
+  // 만료 시간이 지났는데 아직 정리 전이면, 쓰지 않고 정리될 결과를 그대로 보여 준다(실제 정리는 타이머·job_put_chunk)
+  if ((st.state === 'receiving' || (st.state === 'finalizing' && !running.has(id))) && Date.now() - Date.parse(st.updated) >= idleSeconds() * 1000) {
+    return { ...base, state: 'failed', final: true, cleanup_pending: true,
+      error: st.state === 'receiving' ? 'timeout: ' + Math.round(idleSeconds()) + '초 넘게 조각이 오지 않아 멈춘 일감입니다(정리 대기 중). 새 job_id로 처음부터 다시 보내세요'
+        : 'interrupted: 마무리 도중 프로그램이 멈춘 것으로 보입니다. PC 사본은 지우지 않고 남깁니다' };
+  }
+  return base;
 }
 
 /** 시험용: 메모리 캐시 비우기(프로세스가 다시 뜬 것처럼) */

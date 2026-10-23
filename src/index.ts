@@ -229,20 +229,23 @@ const jobUploader: Uploader = {
   }
 };
 server.tool('job_put_chunk',
-  '일감 조각 하나를 받는다. 조각은 어떤 순서로 몇 개가 동시에 와도 된다(같은 조각을 다시 보내도 안전). 모든 파일이 다 모이면 PC가 스스로 올리기→크기 대조→정리(_trash로 이동)를 하고, 이 호출은 기다리지 않고 바로 답한다. 모든 호출에 같은 job_id와 files(이름·크기·sha256)를 싣는다. 조각은 1MiB 미만(base64 전 약 760KB 권장).',
+  '일감 조각 하나를 받는다. 조각은 어떤 순서로 몇 개가 동시에 와도 된다(같은 조각을 다시 보내도 안전). 모든 파일이 다 모이면 PC가 스스로 올리기→크기 대조→정리(_trash로 이동)를 한다. wait_ms를 주면 일감을 완성한 호출(과 마무리 중에 들어온 호출)이 결과까지 최대 wait_ms 기다렸다 답한다(final:true면 최종 결과, false면 아직 마무리 중). 모든 호출에 같은 job_id와 files(이름·크기·sha256)를 싣는다. dry_run이 아니면 parent_id 필수. 조각은 1MiB 미만(base64 전 약 760KB 권장).',
   {
     job_id: z.string().describe('영문·숫자·_·- 1~64자'),
     files: z.array(z.object({ name: z.string(), size: z.number().int(), sha256: z.string().describe('파일 전체의 sha256(16진수 64자)') })).describe('이 일감의 전체 파일 목록'),
     file_name: z.string().describe('이 조각이 속한 파일 이름(files 안에 있어야 함)'),
     offset: z.number().int().describe('파일 안에서 이 조각이 시작하는 바이트 위치'),
     content_base64: z.string(),
-    parent_id: z.string().optional().describe('MYBOX 올릴 폴더 ID(생략 시 루트)'),
+    parent_id: z.string().optional().describe('MYBOX 올릴 폴더 ID — dry_run이 아니면 필수(루트로 올리지 않음)'),
     is_overwrite: z.boolean().optional(),
     dry_run: z.boolean().optional().describe('true면 MYBOX에는 올리지 않고 PC에서 모으기·sha256 대조까지만'),
-    cleanup: z.enum(['trash', 'keep']).optional().describe('마무리 뒤 PC 사본: trash(기본, _trash로 이동) / keep')
+    cleanup: z.enum(['trash', 'keep']).optional().describe('마무리 뒤 PC 사본: trash(기본, _trash로 이동) / keep'),
+    wait_ms: z.number().int().optional().describe('0~120000. 이 호출이 일감을 완성하면 마무리(올리기·대조) 결과까지 최대 이만큼 기다렸다 답한다')
   },
-  async (args) => out(putChunk(args as any, jobUploader)));
-server.tool('job_status', '일감의 진행·마무리 결과를 읽는다(읽기 전용)', { job_id: z.string() }, async (args) => out(jobStatus(args.job_id)));
+  async (args) => out(await putChunk(args as any, jobUploader)));
+server.tool('job_status', '일감의 진행·마무리 결과를 읽는다(읽기 전용)', { job_id: z.string() },
+  { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+  async (args) => out(jobStatus(args.job_id)));
 
 async function run() {
   const transport = new StdioServerTransport();

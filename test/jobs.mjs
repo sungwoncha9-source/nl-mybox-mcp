@@ -8,7 +8,7 @@ let pass = 0, fail = 0;
 const ok = (c, m) => { if (c) { pass++; console.log('  OK  ' + m); } else { fail++; console.log('  FAIL ' + m); } };
 
 // ---- 가짜 MYBOX ----
-const store = new Map(); const calls = [];
+const store = new Map(); const calls = []; let uploadDelay = 0; // 가짜 MYBOX의 올리기 지연(느린 네트워크 흉내)
 const srv = http.createServer((req, res) => {
   const chunks = []; req.on('data', d => chunks.push(d)); req.on('end', () => {
     const body = Buffer.concat(chunks); const url = new URL(req.url, 'http://x'); calls.push(req.method + ' ' + url.pathname);
@@ -17,7 +17,9 @@ const srv = http.createServer((req, res) => {
       store.set(id, { name: b.fileName, parent: b.parentId || 'root', declared: b.fileSize, size: null });
       return json({ uploadUrl: 'http://127.0.0.1:' + srv.address().port + '/upload/' + id }); }
     if (req.method === 'POST' && url.pathname.startsWith('/upload/')) { const id = url.pathname.split('/')[2];
-      const s = body.indexOf('\r\n\r\n') + 4, e = body.lastIndexOf('\r\n--'); store.get(id).size = e - s; res.statusCode = 200; return res.end('ok'); }
+      const finish = () => { if (/^fail/.test(store.get(id).name)) { res.statusCode = 500; return res.end('boom'); }
+        const s = body.indexOf('\r\n\r\n') + 4, e = body.lastIndexOf('\r\n--'); store.get(id).size = e - s; res.statusCode = 200; res.end('ok'); };
+      return uploadDelay ? setTimeout(finish, uploadDelay) : finish(); }
     const m = url.pathname.match(/^\/v1\/drive\/(?:folders\/([^/]+)\/)?resources$/);
     if (req.method === 'GET' && m) { const parent = m[1] || 'root';
       return json({ resources: [...store.values()].filter(x => x.parent === parent && x.size != null).map(x => ({ name: x.name, size: x.size })), responseMetaData: {} }); }
@@ -67,7 +69,7 @@ const s2 = await call(c, 'job_status', { job_id: 'job2' }); ok(s2.files[0].recei
 for (const a of mkChunks('job2', f2, { dry_run: true })) await call(c, 'job_put_chunk', a);
 const s2b = await waitState(c, 'job2', ['dry_run_done', 'failed']); ok(s2b.state === 'dry_run_done', '처음부터 다시 보내면 dry_run_done (MYBOX 호출 없음)');
 const before = calls.length;
-let e2 = null; try { await call(c, 'job_put_chunk', { ...mkChunks('job2', [{ name: 'x.bin', buf: f2[0].buf }], { dry_run: false })[0] }); } catch (e) { e2 = e; }
+let e2 = null; try { await call(c, 'job_put_chunk', { ...mkChunks('job2', [{ name: 'x.bin', buf: f2[0].buf }], { dry_run: false, parent_id: 'F1' })[0] }); } catch (e) { e2 = e; }
 ok(e2 && /job_mismatch/.test(e2.message), '같은 job_id에 옵션이 다르면 job_mismatch');
 for (const n of ['../evil.bin', 'a/b.bin', 'x.part', 'state.json', '.hidden']) { let e = null; try { await call(c, 'job_put_chunk', { job_id: 'job3', files: [{ name: n, size: 3, sha256: sha(Buffer.from('abc')) }], file_name: n, offset: 0, content_base64: Buffer.from('abc').toString('base64') }); } catch (er) { e = er; } ok(!!e, '나쁜 이름 거절: ' + n); }
 let e3 = null; try { await call(c, 'job_put_chunk', { job_id: 'job4', files: [{ name: 'o.bin', size: 3, sha256: sha(Buffer.from('abc')) }], file_name: 'o.bin', offset: 2, content_base64: Buffer.from('abc').toString('base64') }); } catch (e) { e3 = e; }
@@ -96,12 +98,63 @@ await sleep(1200);
 const s6a = await call(c3, 'job_status', { job_id: 'job6' }), s7a = await call(c3, 'job_status', { job_id: 'job7' });
 ok(s6a.state === 'failed' && /timeout/.test(s6a.error || ''), 'job6: 2초 넘게 조용하면 failed(timeout)');
 ok(s7a.state === 'receiving', 'job7: 방금 조각이 와서 아직 receiving (활동하면 만료가 미뤄진다)');
+ok(fs.existsSync(path.join(JOBS, 'job6')), '1.7.0: job_status는 읽기만 하므로 조회만으로는 폴더를 옮기지 않는다');
+const r6 = await call(c3, 'job_put_chunk', ch6[2]);   // 다음 조각 호출이 정리를 한다
 ok(!fs.existsSync(path.join(JOBS, 'job6')) && fs.readdirSync(path.join(JOBS, '_trash')).some(n => n.startsWith('job6_expired_')), 'job6 작업 폴더가 _trash로 옮겨졌다(삭제 아님)');
 ok(fs.existsSync(path.join(JOBS, 'job7')), 'job7 작업 폴더는 그대로');
-const r6 = await call(c3, 'job_put_chunk', ch6[2]);
 ok(r6.accepted === false && /새 job_id/.test(r6.note || ''), '만료된 job6에 조각을 또 보내면 거절하고 새 job_id를 안내');
 await sleep(2300);
 const s7b = await call(c3, 'job_status', { job_id: 'job7' });
 ok(s7b.state === 'failed', 'job7도 조용해진 뒤 만료');
-await c3.close(); srv.close();
+await c3.close();
+
+// 5) 1.7.0: 같은 호출 안에서 최종 결과 받기(wait_ms), parent_id 필수, job_status 읽기 전용 표시
+console.log('[5] wait_ms — 완성한 호출이 마무리 결과까지 기다려 답한다');
+const c4 = await connect();
+const jt = (await c4.listTools()).tools;
+const js = jt.find(t => t.name === 'job_status');
+ok(js && js.annotations && js.annotations.readOnlyHint === true, 'job_status에 읽기 전용 표시(readOnlyHint) — 앱 확인창 대상에서 빠지게');
+const pool = async (list, n, fn) => { const res = new Array(list.length); let i = 0;
+  await Promise.all(Array.from({ length: n }, async () => { while (i < list.length) { const k = i++; try { res[k] = { ok: true, v: await fn(list[k]) }; } catch (e) { res[k] = { ok: false, e }; } } })); return res; };
+uploadDelay = 400;   // 파일마다 0.4초 걸리는 느린 MYBOX
+const f8 = Array.from({ length: 5 }, (_, i) => ({ name: 'p' + i + '.jpg', buf: crypto.randomBytes(300000 + i * 250000) }));
+const ch8 = shuffle(mkChunks('job8', f8, { parent_id: 'F8', wait_ms: 20000 }));
+const t8 = Date.now(); const r8 = await pool(ch8, 8, a => call(c4, 'job_put_chunk', a)); const el8 = Date.now() - t8;
+ok(r8.every(r => r.ok), `조각 ${ch8.length}개를 8개씩 동시에 보내 모두 성공 응답`);
+const fin8 = r8.filter(r => r.v.completed_by_this_call);
+ok(fin8.length === 1, '일감을 완성한 호출은 정확히 1개 (실제 ' + fin8.length + ')');
+const v8 = fin8[0] && fin8[0].v;
+ok(v8 && v8.final === true && v8.state === 'done' && v8.wait_timed_out === false, '그 호출의 응답 자체가 최종 결과: state done, final true (실제 ' + (v8 && v8.state) + ')');
+ok(v8 && v8.files.every(f => f.uploaded && f.verified), '응답 안에서 모든 파일 uploaded·verified(대조 일치)');
+ok(v8 && v8.waited_ms >= 5 * 400 * 0.8, '실제로 마무리 시간만큼 기다렸다 (waited ' + (v8 && v8.waited_ms) + ' ms, 전체 ' + el8 + ' ms)');
+ok(r8.filter(r => !r.v.completed_by_this_call).every(r => r.v.final === false || r.v.accepted === false), '다른 조각 응답은 최종 결과를 주장하지 않는다');
+
+console.log('[5b] wait_ms가 짧으면 거짓 완료 없이 finalizing을 돌려준다');
+uploadDelay = 800;
+const f9 = [{ name: 'q.jpg', buf: crypto.randomBytes(400000) }, { name: 'r.jpg', buf: crypto.randomBytes(400000) }];
+const ch9 = mkChunks('job9', f9, { parent_id: 'F9', wait_ms: 300 });
+let last9; for (const a of ch9) last9 = await call(c4, 'job_put_chunk', a);
+ok(last9.completed_by_this_call && last9.final === false && last9.state === 'finalizing' && last9.wait_timed_out === true, '시간 안에 안 끝나면 final:false·finalizing·wait_timed_out:true (완료라고 하지 않음)');
+const dup9 = await call(c4, 'job_put_chunk', { ...ch9[0], wait_ms: 20000 });
+ok(dup9.accepted === false && dup9.final === true && dup9.state === 'done', '마무리 중에 같은 조각을 다시 보내면(wait_ms) 같은 마무리를 기다려 최종 결과를 받는다 (멱등)');
+const s9 = await call(c4, 'job_status', { job_id: 'job9' }); ok(s9.state === 'done' && s9.final === true, 'job_status로 읽어도 done');
+
+console.log('[5c] 실패도 같은 호출 안에서 받는다');
+uploadDelay = 0;
+const f10 = [{ name: 'fail.jpg', buf: crypto.randomBytes(200000) }];
+const r10 = await call(c4, 'job_put_chunk', { ...mkChunks('job10', f10, { parent_id: 'F10', wait_ms: 10000 })[0] });
+ok(r10.final === true && r10.state === 'failed' && !!r10.error, 'MYBOX 올리기 실패 → 응답이 failed + error (' + String(r10.error).slice(0, 40) + ')');
+ok(fs.existsSync(path.join(JOBS, 'job10')), '실패하면 PC 사본은 지우지 않고 남긴다');
+
+console.log('[5d] 입력 검사');
+let e11 = null; try { await call(c4, 'job_put_chunk', mkChunks('job11', [{ name: 'n.jpg', buf: crypto.randomBytes(1000) }])[0]); } catch (e) { e11 = e; }
+ok(e11 && /parent_id/.test(e11.message), 'dry_run이 아닌데 parent_id가 없으면 거절(루트로 올리지 않음)');
+const r11 = await call(c4, 'job_put_chunk', mkChunks('job11b', [{ name: 'n.jpg', buf: crypto.randomBytes(1000) }], { dry_run: true, wait_ms: 5000 })[0]);
+ok(r11.final === true && r11.state === 'dry_run_done', 'dry_run은 parent_id 없이 되고, 완성 호출이 dry_run_done을 바로 받는다');
+let e12 = null; try { await call(c4, 'job_put_chunk', mkChunks('job12', [{ name: 'n.jpg', buf: crypto.randomBytes(1000) }], { dry_run: true, wait_ms: 999999 })[0]); } catch (e) { e12 = e; }
+ok(e12 && /wait_ms/.test(e12.message), 'wait_ms 범위 밖(120000 초과) 거절');
+const before13 = fs.readdirSync(path.join(JOBS, '_results')).length;
+await call(c4, 'job_status', { job_id: 'job8' }); await call(c4, 'job_status', { job_id: 'nojob' });
+ok(fs.readdirSync(path.join(JOBS, '_results')).length === before13, 'job_status는 결과 폴더에 아무것도 쓰지 않는다(없는 일감 조회 포함)');
+await c4.close(); srv.close();
 console.log(`\n통과 ${pass} / 실패 ${fail}`); fs.rmSync(JOBS, { recursive: true, force: true }); process.exit(fail ? 1 : 0);
