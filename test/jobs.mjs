@@ -8,11 +8,13 @@ let pass = 0, fail = 0;
 const ok = (c, m) => { if (c) { pass++; console.log('  OK  ' + m); } else { fail++; console.log('  FAIL ' + m); } };
 
 // ---- 가짜 MYBOX ----
-const store = new Map(); const calls = []; let uploadDelay = 0; // 가짜 MYBOX의 올리기 지연(느린 네트워크 흉내)
+const store = new Map(); const calls = []; let uploadDelay = 0; const folderCalls = []; // 가짜 MYBOX의 올리기 지연(느린 네트워크 흉내)
 const srv = http.createServer((req, res) => {
   const chunks = []; req.on('data', d => chunks.push(d)); req.on('end', () => {
     const body = Buffer.concat(chunks); const url = new URL(req.url, 'http://x'); calls.push(req.method + ' ' + url.pathname);
     const json = (o) => { res.setHeader('content-type', 'application/json'); res.end(JSON.stringify(o)); };
+    if (req.method === 'POST' && url.pathname === '/v1/drive/folders') { const b = JSON.parse(body); const id = 'FD' + crypto.randomUUID().slice(0, 8);
+      folderCalls.push(b); store.set(id, { name: b.folderName, parent: b.parentId || 'root', size: 0, isFolder: true }); return json({ resourceId: id, name: b.folderName }); }
     if (req.method === 'POST' && url.pathname === '/v1/drive/files') { const b = JSON.parse(body); const id = crypto.randomUUID();
       store.set(id, { name: b.fileName, parent: b.parentId || 'root', declared: b.fileSize, size: null });
       return json({ uploadUrl: 'http://127.0.0.1:' + srv.address().port + '/upload/' + id }); }
@@ -156,5 +158,35 @@ ok(e12 && /wait_ms/.test(e12.message), 'wait_ms 범위 밖(120000 초과) 거절
 const before13 = fs.readdirSync(path.join(JOBS, '_results')).length;
 await call(c4, 'job_status', { job_id: 'job8' }); await call(c4, 'job_status', { job_id: 'nojob' });
 ok(fs.readdirSync(path.join(JOBS, '_results')).length === before13, 'job_status는 결과 폴더에 아무것도 쓰지 않는다(없는 일감 조회 포함)');
+
+console.log('[6] 1.8.0 subfolder — 새 폴더를 만들어 거기에만 올린다');
+uploadDelay = 0;
+// 옛 파일이 같은 이름으로 이미 있는 폴더(F6)를 흉내: 크기가 같은 옛 파일
+const same = crypto.randomBytes(300000);
+store.set('OLD1', { name: 'dup.jpg', parent: 'F6', size: same.length });
+const f13 = [{ name: 'dup.jpg', buf: same }, { name: 'z.jpg', buf: crypto.randomBytes(700000) }];
+const r13 = []; for (const a of shuffle(mkChunks('job13', f13, { parent_id: 'F6', subfolder: 'S_1', wait_ms: 20000 }))) r13.push(await call(c4, 'job_put_chunk', a));
+const v13 = r13.find(r => r.completed_by_this_call);
+ok(v13 && v13.state === 'done' && v13.final === true, 'subfolder 일감이 같은 호출 안에서 done');
+ok(v13 && v13.subfolder === 'S_1' && /^FD/.test(v13.folder_id || ''), '응답에 subfolder 이름과 새 폴더 ID(folder_id)가 있다 (' + (v13 && v13.folder_id) + ')');
+const made = [...store.entries()].find(([id, x]) => x.isFolder && x.name === 'S_1' && x.parent === 'F6');
+ok(!!made && made[0] === (v13 && v13.folder_id), '상위 폴더 F6 아래에 새 폴더 S_1이 만들어졌다');
+const inNew = [...store.values()].filter(x => x.parent === (made && made[0]) && !x.isFolder);
+ok(inNew.length === 2 && f13.every(f => inNew.find(x => x.name === f.name && x.size === f.buf.length)), '파일 2개가 새 폴더 안에 같은 크기로 올라갔다');
+ok([...store.values()].filter(x => x.parent === 'F6' && x.name === 'dup.jpg').length === 1, '상위 폴더의 옛 dup.jpg는 그대로이고 새로 섞이지 않았다');
+ok(v13 && v13.files.every(f => f.uploaded && f.verified), '대조는 새 폴더 안의 파일로 했다(옛 파일과 크기가 같아도 새 폴더에서 찾음)');
+const calls0 = folderCalls.length;
+const r14 = []; for (const a of mkChunks('job14', [{ name: 'y.jpg', buf: crypto.randomBytes(50000) }], { parent_id: 'F6', subfolder: 'S_1', wait_ms: 20000 })) r14.push(await call(c4, 'job_put_chunk', a));
+ok(r14[0].final === true && r14[0].state === 'failed' && /이미 있습니다/.test(r14[0].error || ''), '같은 이름 폴더가 이미 있으면 실패(섞어 올리지 않음)');
+ok(folderCalls.length === calls0 && [...store.values()].filter(x => x.name === 'y.jpg').length === 0, '그때 폴더도 새로 만들지 않았고 파일도 올리지 않았다');
+const callsDry = folderCalls.length;
+const r15 = await call(c4, 'job_put_chunk', mkChunks('job15', [{ name: 'd.jpg', buf: crypto.randomBytes(20000) }], { parent_id: 'F6', subfolder: 'S_dry', dry_run: true, wait_ms: 5000 })[0]);
+ok(r15.state === 'dry_run_done' && r15.folder_id === null && folderCalls.length === callsDry, 'dry_run이면 폴더를 만들지 않는다');
+for (const bad of ['a/b', '../x', 'x.part', '.h']) { let e = null; try { await call(c4, 'job_put_chunk', mkChunks('job16', [{ name: 'q.jpg', buf: crypto.randomBytes(1000) }], { parent_id: 'F6', subfolder: bad, dry_run: true })[0]); } catch (er) { e = er; } ok(!!e, '나쁜 subfolder 이름 거절: ' + bad); }
+let e17 = null; try { await call(c4, 'job_put_chunk', mkChunks('job17', [{ name: 'q.jpg', buf: crypto.randomBytes(1000) }], { subfolder: 'S_2', dry_run: true })[0]); } catch (er) { e17 = er; }
+ok(e17 && /parent_id/.test(e17.message), 'parent_id 없이 subfolder만 주면 거절');
+let e18 = null; const k18 = mkChunks('job18', [{ name: 'q.jpg', buf: crypto.randomBytes(1300000) }], { parent_id: 'F6', subfolder: 'A', dry_run: true });
+await call(c4, 'job_put_chunk', k18[0]); try { await call(c4, 'job_put_chunk', { ...k18[1], subfolder: 'B' }); } catch (er) { e18 = er; }
+ok(e18 && /job_mismatch/.test(e18.message), '같은 job_id에 subfolder가 다르면 job_mismatch');
 await c4.close(); srv.close();
 console.log(`\n통과 ${pass} / 실패 ${fail}`); fs.rmSync(JOBS, { recursive: true, force: true }); process.exit(fail ? 1 : 0);

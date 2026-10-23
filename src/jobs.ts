@@ -7,11 +7,13 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 
 export type FileSpec = { name: string; size: number; sha256: string };
-export type JobOpts = { parentId?: string; isOverwrite?: boolean; dryRun?: boolean; cleanup?: 'trash' | 'keep' };
+export type JobOpts = { parentId?: string; subfolder?: string; isOverwrite?: boolean; dryRun?: boolean; cleanup?: 'trash' | 'keep' };
 export interface Uploader {
   upload(filePath: string, parentId: string | undefined, isOverwrite: boolean): Promise<void>;
   /** 올린 파일이 MYBOX 폴더에 있고 크기가 같은지 읽어서 본다(읽기만) */
   verify(name: string, size: number, parentId: string | undefined): Promise<{ found: boolean; size?: number }>;
+  /** 1.8.0: parentId 아래에 새 폴더를 만들고 그 폴더 ID를 돌려준다. 같은 이름이 이미 있으면 만들지 않고 오류를 던진다 */
+  createFolder(name: string, parentId: string): Promise<string>;
 }
 type FileState = {
   size: number; sha256: string; ranges: Array<[number, number]>; done: boolean;
@@ -22,7 +24,7 @@ export type JobState = {
   state: 'receiving' | 'finalizing' | 'done' | 'dry_run_done' | 'failed';
   spec: { files: FileSpec[]; opts: JobOpts };
   files: Record<string, FileState>;
-  error?: string; staged_dir?: string;
+  error?: string; staged_dir?: string; folder_id?: string;
 };
 
 export const ID_RE = /^[A-Za-z0-9_-]{1,64}$/;
@@ -103,7 +105,7 @@ export function sweepStale(now = Date.now()) {
 }
 function sameSpec(a: JobState['spec'], files: FileSpec[], opts: JobOpts) {
   const norm = (f: FileSpec[]) => f.map(x => x.name + '|' + x.size + '|' + x.sha256.toLowerCase()).sort().join(',');
-  const o = (x: JobOpts) => JSON.stringify([x.parentId || '', !!x.isOverwrite, !!x.dryRun, x.cleanup || 'trash']);
+  const o = (x: JobOpts) => JSON.stringify([x.parentId || '', x.subfolder || '', !!x.isOverwrite, !!x.dryRun, x.cleanup || 'trash']);
   return norm(a.files) === norm(files) && o(a.opts) === o(opts);
 }
 function merge(r: Array<[number, number]>, s: number, e: number): Array<[number, number]> {
@@ -125,13 +127,14 @@ function summary(st: JobState) {
     files: names.map(n => ({ name: n, size: st.files[n].size, received: receivedOf(st.files[n]), done: st.files[n].done,
       uploaded: st.files[n].uploaded ?? null, verified: st.files[n].verified ?? null, error: st.files[n].error ?? null })),
     error: st.error ?? null,
-    final: FINAL.has(st.state)
+    final: FINAL.has(st.state),
+    subfolder: st.spec.opts.subfolder ?? null, folder_id: st.folder_id ?? null
   };
 }
 
 export type ChunkArgs = {
   job_id: string; files: FileSpec[]; file_name: string; offset: number; content_base64: string;
-  parent_id?: string; is_overwrite?: boolean; dry_run?: boolean; cleanup?: 'trash' | 'keep';
+  parent_id?: string; subfolder?: string; is_overwrite?: boolean; dry_run?: boolean; cleanup?: 'trash' | 'keep';
   /** 1.7.0: 이 호출이 일감을 완성하거나 이미 마무리 중이면, 마무리 결과가 나올 때까지 최대 wait_ms 기다렸다 답한다.
    *  시간 안에 안 끝나면 그때의 상태(finalizing, final:false)를 그대로 돌려준다(완료로 꾸미지 않는다). 0/생략 = 기다리지 않음 */
   wait_ms?: number;
@@ -174,10 +177,15 @@ export async function putChunk(a: ChunkArgs, uploader: Uploader) {
   if (buf.length === 0 || buf.length > LIMITS.maxChunk) throw new Error('조각 크기는 1바이트~1MiB여야 합니다: ' + buf.length);
   if (!Number.isInteger(a.offset) || a.offset < 0 || a.offset + buf.length > spec.size) throw new Error('offset+조각 크기가 파일 크기를 넘습니다');
   if (!a.dry_run && !(typeof a.parent_id === 'string' && a.parent_id.trim())) throw new Error('parent_id가 필요합니다(1.7.0부터 MYBOX 루트로 올리지 않습니다). dry_run이면 생략 가능');
+  if (a.subfolder != null && a.subfolder !== '') {
+    checkName(a.subfolder);
+    if (/\.part$/i.test(a.subfolder) || a.subfolder.length > 100) throw new Error('쓸 수 없는 하위 폴더 이름입니다: ' + a.subfolder);
+    if (!a.parent_id) throw new Error('subfolder를 쓰려면 parent_id(상위 폴더 ID)가 필요합니다');
+  }
   const waitMs = a.wait_ms == null ? 0 : a.wait_ms;
   if (!Number.isInteger(waitMs) || waitMs < 0 || waitMs > WAIT_MAX_MS) throw new Error('wait_ms는 0~' + WAIT_MAX_MS + ' 정수여야 합니다');
 
-  const opts: JobOpts = { parentId: a.parent_id, isOverwrite: a.is_overwrite, dryRun: a.dry_run, cleanup: a.cleanup };
+  const opts: JobOpts = { parentId: a.parent_id, subfolder: a.subfolder || undefined, isOverwrite: a.is_overwrite, dryRun: a.dry_run, cleanup: a.cleanup };
   let st = load(a.job_id);
   if (!st) {
     st = { job_id: a.job_id, created: new Date().toISOString(), updated: '', state: 'receiving',
@@ -226,12 +234,17 @@ export async function finalize(st: JobState, uploader: Uploader) {
   const dir = stagePath(st.job_id), o = st.spec.opts;
   try {
     if (!o.dryRun) {
+      let target = o.parentId;
+      if (o.subfolder) {   // 새 폴더를 만들고 거기에만 올린다 → 옛 파일과 섞이지 않는다. 같은 이름 폴더가 있으면 실패(새 이름으로 새 일감)
+        target = await uploader.createFolder(o.subfolder, o.parentId as string);
+        st.folder_id = target; save(st);
+      }
       for (const f of st.spec.files) {
-        await uploader.upload(path.join(dir, f.name), o.parentId, !!o.isOverwrite);
+        await uploader.upload(path.join(dir, f.name), target, !!o.isOverwrite);
         st.files[f.name].uploaded = true; save(st);
       }
       for (const f of st.spec.files) {
-        const v = await uploader.verify(f.name, f.size, o.parentId);
+        const v = await uploader.verify(f.name, f.size, target);
         st.files[f.name].verified = v.found && v.size === f.size;
         if (!st.files[f.name].verified) st.files[f.name].error = v.found ? '크기가 다릅니다: MYBOX ' + v.size + ' / 기대 ' + f.size : 'MYBOX 목록에서 못 찾음';
         save(st);

@@ -54267,7 +54267,7 @@ function sweepStale(now = Date.now()) {
 }
 function sameSpec(a, files, opts) {
   const norm = (f) => f.map((x) => x.name + "|" + x.size + "|" + x.sha256.toLowerCase()).sort().join(",");
-  const o = (x) => JSON.stringify([x.parentId || "", !!x.isOverwrite, !!x.dryRun, x.cleanup || "trash"]);
+  const o = (x) => JSON.stringify([x.parentId || "", x.subfolder || "", !!x.isOverwrite, !!x.dryRun, x.cleanup || "trash"]);
   return norm(a.files) === norm(files) && o(a.opts) === o(opts);
 }
 function merge3(r, s, e) {
@@ -54298,7 +54298,9 @@ function summary(st) {
       error: st.files[n].error ?? null
     })),
     error: st.error ?? null,
-    final: FINAL.has(st.state)
+    final: FINAL.has(st.state),
+    subfolder: st.spec.opts.subfolder ?? null,
+    folder_id: st.folder_id ?? null
   };
 }
 async function waitFinal(id, waitMs) {
@@ -54338,9 +54340,14 @@ async function putChunk(a, uploader) {
   if (buf.length === 0 || buf.length > LIMITS.maxChunk) throw new Error("\uC870\uAC01 \uD06C\uAE30\uB294 1\uBC14\uC774\uD2B8~1MiB\uC5EC\uC57C \uD569\uB2C8\uB2E4: " + buf.length);
   if (!Number.isInteger(a.offset) || a.offset < 0 || a.offset + buf.length > spec.size) throw new Error("offset+\uC870\uAC01 \uD06C\uAE30\uAC00 \uD30C\uC77C \uD06C\uAE30\uB97C \uB118\uC2B5\uB2C8\uB2E4");
   if (!a.dry_run && !(typeof a.parent_id === "string" && a.parent_id.trim())) throw new Error("parent_id\uAC00 \uD544\uC694\uD569\uB2C8\uB2E4(1.7.0\uBD80\uD130 MYBOX \uB8E8\uD2B8\uB85C \uC62C\uB9AC\uC9C0 \uC54A\uC2B5\uB2C8\uB2E4). dry_run\uC774\uBA74 \uC0DD\uB7B5 \uAC00\uB2A5");
+  if (a.subfolder != null && a.subfolder !== "") {
+    checkName(a.subfolder);
+    if (/\.part$/i.test(a.subfolder) || a.subfolder.length > 100) throw new Error("\uC4F8 \uC218 \uC5C6\uB294 \uD558\uC704 \uD3F4\uB354 \uC774\uB984\uC785\uB2C8\uB2E4: " + a.subfolder);
+    if (!a.parent_id) throw new Error("subfolder\uB97C \uC4F0\uB824\uBA74 parent_id(\uC0C1\uC704 \uD3F4\uB354 ID)\uAC00 \uD544\uC694\uD569\uB2C8\uB2E4");
+  }
   const waitMs = a.wait_ms == null ? 0 : a.wait_ms;
   if (!Number.isInteger(waitMs) || waitMs < 0 || waitMs > WAIT_MAX_MS) throw new Error("wait_ms\uB294 0~" + WAIT_MAX_MS + " \uC815\uC218\uC5EC\uC57C \uD569\uB2C8\uB2E4");
-  const opts = { parentId: a.parent_id, isOverwrite: a.is_overwrite, dryRun: a.dry_run, cleanup: a.cleanup };
+  const opts = { parentId: a.parent_id, subfolder: a.subfolder || void 0, isOverwrite: a.is_overwrite, dryRun: a.dry_run, cleanup: a.cleanup };
   let st = load(a.job_id);
   if (!st) {
     st = {
@@ -54409,13 +54416,19 @@ async function finalize2(st, uploader) {
   const dir = stagePath(st.job_id), o = st.spec.opts;
   try {
     if (!o.dryRun) {
+      let target = o.parentId;
+      if (o.subfolder) {
+        target = await uploader.createFolder(o.subfolder, o.parentId);
+        st.folder_id = target;
+        save(st);
+      }
       for (const f of st.spec.files) {
-        await uploader.upload(path.join(dir, f.name), o.parentId, !!o.isOverwrite);
+        await uploader.upload(path.join(dir, f.name), target, !!o.isOverwrite);
         st.files[f.name].uploaded = true;
         save(st);
       }
       for (const f of st.spec.files) {
-        const v = await uploader.verify(f.name, f.size, o.parentId);
+        const v = await uploader.verify(f.name, f.size, target);
         st.files[f.name].verified = v.found && v.size === f.size;
         if (!st.files[f.name].verified) st.files[f.name].error = v.found ? "\uD06C\uAE30\uAC00 \uB2E4\uB985\uB2C8\uB2E4: MYBOX " + v.size + " / \uAE30\uB300 " + f.size : "MYBOX \uBAA9\uB85D\uC5D0\uC11C \uBABB \uCC3E\uC74C";
         save(st);
@@ -54626,6 +54639,21 @@ function findKey2(o, keys) {
   return null;
 }
 var jobUploader = {
+  createFolder: async (name, parentId) => {
+    let cursor;
+    for (let page = 0; page < 20; page++) {
+      const params = { count: 1e3 };
+      if (cursor) params.cursor = cursor;
+      const r = await makeRequest("GET", `/drive/folders/${parentId}/resources`, void 0, params);
+      if (findNamed(r, name)) throw new Error("subfolder \uC774\uB984\uC774 \uC774\uBBF8 \uC788\uC2B5\uB2C8\uB2E4: " + name + " \u2014 \uC0C8 \uC774\uB984\uC73C\uB85C \uC0C8 job_id\uB97C \uC4F0\uC138\uC694");
+      cursor = r && r.responseMetaData && r.responseMetaData.nextCursor;
+      if (!cursor) break;
+    }
+    const made = await makeRequest("POST", "/drive/folders", { folderName: name, parentId });
+    const id = findKey2(made, ["resourceId", "id"]);
+    if (!id) throw new Error("\uD3F4\uB354\uB294 \uB9CC\uB4E4\uC5C8\uC9C0\uB9CC \uD3F4\uB354 ID\uB97C \uBABB \uC77D\uC5C8\uC2B5\uB2C8\uB2E4: " + JSON.stringify(made).slice(0, 200));
+    return String(id);
+  },
   upload: async (filePath, parentId, isOverwrite) => {
     await uploadOne(filePath, parentId, isOverwrite);
   },
@@ -54656,6 +54684,7 @@ server.tool(
     offset: external_exports.number().int().describe("\uD30C\uC77C \uC548\uC5D0\uC11C \uC774 \uC870\uAC01\uC774 \uC2DC\uC791\uD558\uB294 \uBC14\uC774\uD2B8 \uC704\uCE58"),
     content_base64: external_exports.string(),
     parent_id: external_exports.string().optional().describe("MYBOX \uC62C\uB9B4 \uD3F4\uB354 ID \u2014 dry_run\uC774 \uC544\uB2C8\uBA74 \uD544\uC218(\uB8E8\uD2B8\uB85C \uC62C\uB9AC\uC9C0 \uC54A\uC74C)"),
+    subfolder: external_exports.string().optional().describe("\uC8FC\uBA74 parent_id \uC544\uB798\uC5D0 \uC774 \uC774\uB984\uC758 \uC0C8 \uD3F4\uB354\uB97C \uB9C8\uBB34\uB9AC \uB54C \uB9CC\uB4E4\uACE0 \uAC70\uAE30\uC5D0 \uC62C\uB9B0\uB2E4(\uAC19\uC740 \uC774\uB984\uC774 \uC774\uBBF8 \uC788\uC73C\uBA74 \uC2E4\uD328). \uC751\uB2F5\uC758 folder_id\uAC00 \uC0C8 \uD3F4\uB354 ID"),
     is_overwrite: external_exports.boolean().optional(),
     dry_run: external_exports.boolean().optional().describe("true\uBA74 MYBOX\uC5D0\uB294 \uC62C\uB9AC\uC9C0 \uC54A\uACE0 PC\uC5D0\uC11C \uBAA8\uC73C\uAE30\xB7sha256 \uB300\uC870\uAE4C\uC9C0\uB9CC"),
     cleanup: external_exports.enum(["trash", "keep"]).optional().describe("\uB9C8\uBB34\uB9AC \uB4A4 PC \uC0AC\uBCF8: trash(\uAE30\uBCF8, _trash\uB85C \uC774\uB3D9) / keep"),

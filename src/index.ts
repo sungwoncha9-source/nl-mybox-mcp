@@ -214,6 +214,20 @@ function findKey(o: any, keys: string[]): any {
   return null;
 }
 const jobUploader: Uploader = {
+  createFolder: async (name, parentId) => {
+    let cursor: string | undefined;
+    for (let page = 0; page < 20; page++) {   // 같은 이름이 이미 있으면 만들지 않는다(있는 폴더에 섞어 올리지 않기 위해)
+      const params: any = { count: 1000 }; if (cursor) params.cursor = cursor;
+      const r: any = await makeRequest('GET', `/drive/folders/${parentId}/resources`, undefined, params);
+      if (findNamed(r, name)) throw new Error('subfolder 이름이 이미 있습니다: ' + name + ' — 새 이름으로 새 job_id를 쓰세요');
+      cursor = r && r.responseMetaData && r.responseMetaData.nextCursor;
+      if (!cursor) break;
+    }
+    const made: any = await makeRequest('POST', '/drive/folders', { folderName: name, parentId });
+    const id = findKey(made, ['resourceId', 'id']);
+    if (!id) throw new Error('폴더는 만들었지만 폴더 ID를 못 읽었습니다: ' + JSON.stringify(made).slice(0, 200));
+    return String(id);
+  },
   upload: async (filePath, parentId, isOverwrite) => { await uploadOne(filePath, parentId, isOverwrite); },
   verify: async (name, size, parentId) => {
     let cursor: string | undefined;
@@ -237,6 +251,7 @@ server.tool('job_put_chunk',
     offset: z.number().int().describe('파일 안에서 이 조각이 시작하는 바이트 위치'),
     content_base64: z.string(),
     parent_id: z.string().optional().describe('MYBOX 올릴 폴더 ID — dry_run이 아니면 필수(루트로 올리지 않음)'),
+    subfolder: z.string().optional().describe('주면 parent_id 아래에 이 이름의 새 폴더를 마무리 때 만들고 거기에 올린다(같은 이름이 이미 있으면 실패). 응답의 folder_id가 새 폴더 ID'),
     is_overwrite: z.boolean().optional(),
     dry_run: z.boolean().optional().describe('true면 MYBOX에는 올리지 않고 PC에서 모으기·sha256 대조까지만'),
     cleanup: z.enum(['trash', 'keep']).optional().describe('마무리 뒤 PC 사본: trash(기본, _trash로 이동) / keep'),
