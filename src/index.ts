@@ -8,9 +8,10 @@ import { z } from 'zod';
 import axios from 'axios';
 import fs from 'node:fs';
 import path from 'node:path';
+import { putChunk, jobStatus, type Uploader } from './jobs.js';
 
-const server = new McpServer({ name: 'mybox-mcp', version: '1.1.0' });
-const BASE_URL = 'https://open-api.mybox.naver.com/v1';
+const server = new McpServer({ name: 'mybox-mcp', version: '1.2.0' });
+const BASE_URL = process.env.MYBOX_BASE_URL || 'https://open-api.mybox.naver.com/v1'; // 시험용으로만 바꾼다
 
 function getAuthHeaders() {
   const token = process.env.MYBOX_ACCESS_TOKEN;
@@ -177,24 +178,71 @@ server.tool('files_download_to_path', '파일을 PC의 지정 폴더에 바로 �
   return out({ path: target, skipped: false, bytes: buf.length, expected: meta.size ?? null });
 });
 
+// 올리기 본체: files_upload_from_path 와 일감(job) 마무리가 같이 쓴다
+async function uploadOne(filePath: string, parentId: string | undefined, isOverwrite: boolean) {
+  const st = fs.statSync(filePath);
+  if (!st.isFile()) throw new Error('not a file');
+  const fileName = path.basename(filePath);
+  const body: any = { fileName, fileSize: st.size, isOverwrite: !!isOverwrite };
+  if (parentId) body.parentId = parentId;
+  const ticket: any = await makeRequest('POST', '/drive/files', body);
+  const form = new FormData();
+  form.append('Filedata', new Blob([fs.readFileSync(filePath)]), fileName);
+  const res = await fetch(ticket.uploadUrl, { method: 'POST', body: form });
+  const text = await res.text();
+  if (!res.ok) throw new Error('upload failed ' + res.status + ' ' + text.slice(0, 200));
+  return { name: fileName, bytes: st.size, status: res.status };
+}
+
 server.tool('files_upload_from_path', 'PC의 파일 하나를 MYBOX에 올리기', {
   filePath: z.string(),
   parentId: z.string().optional().describe('올릴 폴더 ID(생략 시 루트)'),
   isOverwrite: z.boolean().optional()
-}, async (args) => {
-  const st = fs.statSync(args.filePath);
-  if (!st.isFile()) throw new Error('not a file');
-  const fileName = path.basename(args.filePath);
-  const body: any = { fileName, fileSize: st.size, isOverwrite: !!args.isOverwrite };
-  if (args.parentId) body.parentId = args.parentId;
-  const ticket: any = await makeRequest('POST', '/drive/files', body);
-  const form = new FormData();
-  form.append('Filedata', new Blob([fs.readFileSync(args.filePath)]), fileName);
-  const res = await fetch(ticket.uploadUrl, { method: 'POST', body: form });
-  const text = await res.text();
-  if (!res.ok) throw new Error('upload failed ' + res.status + ' ' + text.slice(0, 200));
-  return out({ name: fileName, bytes: st.size, status: res.status });
-});
+}, async (args) => out(await uploadOne(args.filePath, args.parentId, !!args.isOverwrite)));
+
+// ---- 추가: 일감(job) — 화면이 조각을 순서 없이·동시에 보내면 PC가 모아 MYBOX까지 마무리 -------------
+function findNamed(o: any, name: string): any {
+  if (o == null || typeof o !== 'object') return null;
+  if (o.name === name || o.fileName === name || o.resourceName === name) return o;
+  for (const v of Array.isArray(o) ? o : Object.values(o)) { const r = findNamed(v, name); if (r) return r; }
+  return null;
+}
+function findKey(o: any, keys: string[]): any {
+  if (o == null || typeof o !== 'object') return null;
+  for (const k of keys) if (o[k] != null && typeof o[k] !== 'object') return o[k];
+  for (const v of Array.isArray(o) ? o : Object.values(o)) { const r = findKey(v, keys); if (r != null) return r; }
+  return null;
+}
+const jobUploader: Uploader = {
+  upload: async (filePath, parentId, isOverwrite) => { await uploadOne(filePath, parentId, isOverwrite); },
+  verify: async (name, size, parentId) => {
+    let cursor: string | undefined;
+    for (let page = 0; page < 20; page++) {
+      const params: any = { count: 1000 }; if (cursor) params.cursor = cursor;
+      const r: any = await makeRequest('GET', parentId ? `/drive/folders/${parentId}/resources` : '/drive/resources', undefined, params);
+      const it = findNamed(r, name);
+      if (it) { const sz = findKey(it, ['size', 'sizeBytes', 'fileSize', 'bytes', 'contentLength']); return { found: true, size: sz == null ? undefined : Number(sz) }; }
+      cursor = r && r.responseMetaData && r.responseMetaData.nextCursor;
+      if (!cursor) break;
+    }
+    return { found: false };
+  }
+};
+server.tool('job_put_chunk',
+  '일감 조각 하나를 받는다. 조각은 어떤 순서로 몇 개가 동시에 와도 된다(같은 조각을 다시 보내도 안전). 모든 파일이 다 모이면 PC가 스스로 올리기→크기 대조→정리(_trash로 이동)를 하고, 이 호출은 기다리지 않고 바로 답한다. 모든 호출에 같은 job_id와 files(이름·크기·sha256)를 싣는다. 조각은 1MiB 미만(base64 전 약 760KB 권장).',
+  {
+    job_id: z.string().describe('영문·숫자·_·- 1~64자'),
+    files: z.array(z.object({ name: z.string(), size: z.number().int(), sha256: z.string().describe('파일 전체의 sha256(16진수 64자)') })).describe('이 일감의 전체 파일 목록'),
+    file_name: z.string().describe('이 조각이 속한 파일 이름(files 안에 있어야 함)'),
+    offset: z.number().int().describe('파일 안에서 이 조각이 시작하는 바이트 위치'),
+    content_base64: z.string(),
+    parent_id: z.string().optional().describe('MYBOX 올릴 폴더 ID(생략 시 루트)'),
+    is_overwrite: z.boolean().optional(),
+    dry_run: z.boolean().optional().describe('true면 MYBOX에는 올리지 않고 PC에서 모으기·sha256 대조까지만'),
+    cleanup: z.enum(['trash', 'keep']).optional().describe('마무리 뒤 PC 사본: trash(기본, _trash로 이동) / keep')
+  },
+  async (args) => out(putChunk(args as any, jobUploader)));
+server.tool('job_status', '일감의 진행·마무리 결과를 읽는다(읽기 전용)', { job_id: z.string() }, async (args) => out(jobStatus(args.job_id)));
 
 async function run() {
   const transport = new StdioServerTransport();
