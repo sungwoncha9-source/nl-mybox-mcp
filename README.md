@@ -25,5 +25,6 @@ PC 경로로 바로 받기/올리기 도구 2개(files_download_to_path, files_u
   모든 호출에 같은 `job_id`와 `files`(이름·크기·sha256)를 싣는다. 파일이 다 모이면 sha256을 대조하고, 일감의 모든 파일이 모이면
   PC가 스스로 올리기 → MYBOX 크기 대조 → 작업 폴더를 `_trash`로 이동을 한다(기다리지 않고 바로 답함). `dry_run:true`면 올리기를 건너뛴다.
 - `job_status`: 진행·마무리 결과를 읽는다(읽기 전용). 기록은 `<NL_JOBS_DIR>\_results\<job_id>.json`.
+- 만료: 마지막 조각 뒤 `NL_JOB_IDLE_SEC`초(기본 1800=30분) 넘게 조용한 일감은 작업 폴더를 `_trash`로 옮기고 `failed(timeout)`으로 표시한다(마무리 도중 멈춘 일감은 사본을 남기고 `failed(interrupted)`). 같은 job_id로 다시 보내면 새 job_id를 안내한다.
 - 작업 폴더: 환경변수 `NL_JOBS_DIR`(기본 `D:\nodelab_work\_jobs`). 토큰은 다루지 않는다(기존 올리기 코드를 안에서 부른다).
 - 시험: `node test/jobs.mjs ./mybox-mcp.mjs` (가짜 MYBOX 서버로 전 흐름 20항목). 시험용 환경변수 `MYBOX_BASE_URL`은 시험 말고는 쓰지 않는다.

@@ -58,6 +58,45 @@ function load(id: string): JobState | null {
     return st;
   } catch { return null; }
 }
+
+/** 멈춘 일감 정리. 마지막 활동(updated) 뒤 NL_JOB_IDLE_SEC초(기본 1800)가 지난 일감:
+ *  receiving이면 작업 폴더를 _trash로 옮기고 failed(timeout)로 표시, finalizing이면 사본은 남기고 failed(interrupted)로 표시한다. */
+export function idleSeconds(): number {
+  const n = Number(process.env.NL_JOB_IDLE_SEC);
+  return Number.isFinite(n) && n > 0 ? n : 1800;
+}
+export function sweepStale(now = Date.now()) {
+  const dir = path.join(jobsRoot(), '_results');
+  let names: string[];
+  try { names = fs.readdirSync(dir); } catch { return; }
+  const limit = idleSeconds() * 1000;
+  for (const n of names) {
+    if (!n.endsWith('.json')) continue;
+    try {
+      const id = n.slice(0, -5);
+      if (!ID_RE.test(id)) continue;
+      if (now - fs.statSync(path.join(dir, n)).mtimeMs < limit) continue;   // 파일이 최근이면 읽지 않는다
+      const st = load(id);
+      if (!st || now - Date.parse(st.updated) < limit) continue;
+      if (st.state === 'receiving') {
+        const from = stagePath(id);
+        if (fs.existsSync(from)) {
+          const trash = path.join(jobsRoot(), '_trash');
+          fs.mkdirSync(trash, { recursive: true });
+          const to = path.join(trash, id + '_expired_' + now);
+          fs.renameSync(from, to); st.staged_dir = to;
+        }
+        st.state = 'failed';
+        st.error = 'timeout: ' + Math.round(idleSeconds()) + '초 넘게 조각이 오지 않아 멈춘 일감입니다. PC 사본은 _trash로 옮겼습니다. 새 job_id로 처음부터 다시 보내세요';
+        save(st);
+      } else if (st.state === 'finalizing') {
+        st.state = 'failed';
+        st.error = 'interrupted: 마무리 도중 프로그램이 멈춘 것으로 보입니다. PC 사본은 지우지 않고 남겼습니다: ' + stagePath(id);
+        save(st);
+      }
+    } catch { /* 한 건이 실패해도 나머지는 계속 */ }
+  }
+}
 function sameSpec(a: JobState['spec'], files: FileSpec[], opts: JobOpts) {
   const norm = (f: FileSpec[]) => f.map(x => x.name + '|' + x.size + '|' + x.sha256.toLowerCase()).sort().join(',');
   const o = (x: JobOpts) => JSON.stringify([x.parentId || '', !!x.isOverwrite, !!x.dryRun, x.cleanup || 'trash']);
@@ -92,6 +131,7 @@ export type ChunkArgs = {
 
 /** 조각 하나를 받는다. 안쪽은 전부 동기 작업이라 동시에 여러 호출이 와도 서로 끼어들지 않는다. */
 export function putChunk(a: ChunkArgs, uploader: Uploader) {
+  sweepStale();
   if (!ID_RE.test(a.job_id || '')) throw new Error('job_id는 영문·숫자·_·- 1~64자여야 합니다');
   if (!Array.isArray(a.files) || a.files.length < 1 || a.files.length > LIMITS.maxFiles) throw new Error('files는 1~' + LIMITS.maxFiles + '개여야 합니다');
   let total = 0; const seen = new Set<string>();
@@ -125,7 +165,7 @@ export function putChunk(a: ChunkArgs, uploader: Uploader) {
   const fs0 = st.files[a.file_name];
   if (st.state !== 'receiving' || fs0.done) {
     save(st);
-    return { ...summary(st), accepted: false, note: fs0.done ? '이 파일은 이미 다 받았습니다(중복 조각은 무시)' : '일감이 이미 마무리 단계입니다' };
+    return { ...summary(st), accepted: false, note: st.state === 'failed' ? '일감이 실패했거나 만료됐습니다(job_status의 error 참고) — 새 job_id로 처음부터 다시 보내세요' : fs0.done ? '이 파일은 이미 다 받았습니다(중복 조각은 무시)' : '일감이 이미 마무리 단계입니다' };
   }
   const dir = stagePath(a.job_id);
   fs.mkdirSync(dir, { recursive: true });
@@ -182,6 +222,7 @@ export async function finalize(st: JobState, uploader: Uploader) {
 }
 
 export function jobStatus(id: string) {
+  sweepStale();
   if (!ID_RE.test(id || '')) throw new Error('job_id가 올바르지 않습니다');
   const st = load(id);
   if (!st) return { job_id: id, state: 'unknown', note: '이 job_id의 기록이 없습니다' };
@@ -190,3 +231,6 @@ export function jobStatus(id: string) {
 
 /** 시험용: 메모리 캐시 비우기(프로세스가 다시 뜬 것처럼) */
 export function _resetMemory() { mem.clear(); }
+
+// 오래 떠 있는 프로세스에서도 주기적으로 정리(프로세스 종료를 막지 않는다)
+setInterval(() => { try { sweepStale(); } catch { /* 다음 주기에 다시 */ } }, 60000).unref();

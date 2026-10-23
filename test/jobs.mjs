@@ -26,8 +26,8 @@ const srv = http.createServer((req, res) => {
 });
 await new Promise(r => srv.listen(0, '127.0.0.1', r));
 
-const connect = async () => { const c = new Client({ name: 't', version: '1' });
-  await c.connect(new StdioClientTransport({ command: 'node', args: [BUNDLE], env: { ...process.env, MYBOX_ACCESS_TOKEN: 'dummy', MYBOX_BASE_URL: 'http://127.0.0.1:' + srv.address().port + '/v1', NL_JOBS_DIR: JOBS } })); return c; };
+const connect = async (extra = {}) => { const c = new Client({ name: 't', version: '1' });
+  await c.connect(new StdioClientTransport({ command: 'node', args: [BUNDLE], env: { ...process.env, MYBOX_ACCESS_TOKEN: 'dummy', MYBOX_BASE_URL: 'http://127.0.0.1:' + srv.address().port + '/v1', NL_JOBS_DIR: JOBS, ...extra } })); return c; };
 const call = async (c, name, args) => { const r = await c.callTool({ name, arguments: args }); const t = r.content?.[0]?.text; if (r.isError) { const e = new Error(t); e.isErr = true; throw e; } return JSON.parse(t); };
 const sha = b => crypto.createHash('sha256').update(b).digest('hex');
 const shuffle = a => { for (let i = a.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [a[i], a[j]] = [a[j], a[i]]; } return a; };
@@ -83,5 +83,25 @@ const c2 = await connect();
 const mid = await call(c2, 'job_status', { job_id: 'job5' }); ok(!mid.files[0].done && mid.files[0].received > 0, '다시 뜬 뒤 진행 기록이 남아 있다 (받은 ' + mid.files[0].received + ' B)');
 for (const a of ch5.slice(3)) await call(c2, 'job_put_chunk', a);
 const s5 = await waitState(c2, 'job5', ['dry_run_done', 'failed']); ok(s5.state === 'dry_run_done' && s5.files[0].done, '나머지 조각만 보내 완료');
-await c2.close(); srv.close();
+// 4) 멈춘 일감 만료
+console.log('[4] 멈춘 일감 만료 (NL_JOB_IDLE_SEC=2)');
+await c2.close();
+const c3 = await connect({ NL_JOB_IDLE_SEC: '2' });
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+const f6 = [{ name: 's.bin', buf: crypto.randomBytes(2400000) }], ch6 = mkChunks('job6', f6, { dry_run: true });
+const f7 = [{ name: 'k.bin', buf: crypto.randomBytes(2400000) }], ch7 = mkChunks('job7', f7, { dry_run: true });
+await call(c3, 'job_put_chunk', ch6[0]); await call(c3, 'job_put_chunk', ch6[1]); await call(c3, 'job_put_chunk', ch7[0]);
+await sleep(1200); await call(c3, 'job_put_chunk', ch7[1]);   // job7만 활동
+await sleep(1200);
+const s6a = await call(c3, 'job_status', { job_id: 'job6' }), s7a = await call(c3, 'job_status', { job_id: 'job7' });
+ok(s6a.state === 'failed' && /timeout/.test(s6a.error || ''), 'job6: 2초 넘게 조용하면 failed(timeout)');
+ok(s7a.state === 'receiving', 'job7: 방금 조각이 와서 아직 receiving (활동하면 만료가 미뤄진다)');
+ok(!fs.existsSync(path.join(JOBS, 'job6')) && fs.readdirSync(path.join(JOBS, '_trash')).some(n => n.startsWith('job6_expired_')), 'job6 작업 폴더가 _trash로 옮겨졌다(삭제 아님)');
+ok(fs.existsSync(path.join(JOBS, 'job7')), 'job7 작업 폴더는 그대로');
+const r6 = await call(c3, 'job_put_chunk', ch6[2]);
+ok(r6.accepted === false && /새 job_id/.test(r6.note || ''), '만료된 job6에 조각을 또 보내면 거절하고 새 job_id를 안내');
+await sleep(2300);
+const s7b = await call(c3, 'job_status', { job_id: 'job7' });
+ok(s7b.state === 'failed', 'job7도 조용해진 뒤 만료');
+await c3.close(); srv.close();
 console.log(`\n통과 ${pass} / 실패 ${fail}`); fs.rmSync(JOBS, { recursive: true, force: true }); process.exit(fail ? 1 : 0);

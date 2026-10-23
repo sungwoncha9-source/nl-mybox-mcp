@@ -1,6 +1,6 @@
 {
   "name": "nl-mybox-mcp",
-  "version": "1.6.0",
+  "version": "1.6.1",
   "description": "노드랩 수정판 Naver MYBOX Open API MCP 서버 (원본: minking/mybox-mcp, MIT)",
   "type": "module",
   "bin": {
