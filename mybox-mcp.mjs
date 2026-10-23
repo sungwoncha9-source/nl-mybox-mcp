@@ -54220,6 +54220,48 @@ function load(id) {
     return null;
   }
 }
+function idleSeconds() {
+  const n = Number(process.env.NL_JOB_IDLE_SEC);
+  return Number.isFinite(n) && n > 0 ? n : 1800;
+}
+function sweepStale(now = Date.now()) {
+  const dir = path.join(jobsRoot(), "_results");
+  let names;
+  try {
+    names = fs.readdirSync(dir);
+  } catch {
+    return;
+  }
+  const limit = idleSeconds() * 1e3;
+  for (const n of names) {
+    if (!n.endsWith(".json")) continue;
+    try {
+      const id = n.slice(0, -5);
+      if (!ID_RE.test(id)) continue;
+      if (now - fs.statSync(path.join(dir, n)).mtimeMs < limit) continue;
+      const st = load(id);
+      if (!st || now - Date.parse(st.updated) < limit) continue;
+      if (st.state === "receiving") {
+        const from = stagePath(id);
+        if (fs.existsSync(from)) {
+          const trash = path.join(jobsRoot(), "_trash");
+          fs.mkdirSync(trash, { recursive: true });
+          const to = path.join(trash, id + "_expired_" + now);
+          fs.renameSync(from, to);
+          st.staged_dir = to;
+        }
+        st.state = "failed";
+        st.error = "timeout: " + Math.round(idleSeconds()) + "\uCD08 \uB118\uAC8C \uC870\uAC01\uC774 \uC624\uC9C0 \uC54A\uC544 \uBA48\uCD98 \uC77C\uAC10\uC785\uB2C8\uB2E4. PC \uC0AC\uBCF8\uC740 _trash\uB85C \uC62E\uACBC\uC2B5\uB2C8\uB2E4. \uC0C8 job_id\uB85C \uCC98\uC74C\uBD80\uD130 \uB2E4\uC2DC \uBCF4\uB0B4\uC138\uC694";
+        save(st);
+      } else if (st.state === "finalizing") {
+        st.state = "failed";
+        st.error = "interrupted: \uB9C8\uBB34\uB9AC \uB3C4\uC911 \uD504\uB85C\uADF8\uB7A8\uC774 \uBA48\uCD98 \uAC83\uC73C\uB85C \uBCF4\uC785\uB2C8\uB2E4. PC \uC0AC\uBCF8\uC740 \uC9C0\uC6B0\uC9C0 \uC54A\uACE0 \uB0A8\uACBC\uC2B5\uB2C8\uB2E4: " + stagePath(id);
+        save(st);
+      }
+    } catch {
+    }
+  }
+}
 function sameSpec(a, files, opts) {
   const norm = (f) => f.map((x) => x.name + "|" + x.size + "|" + x.sha256.toLowerCase()).sort().join(",");
   const o = (x) => JSON.stringify([x.parentId || "", !!x.isOverwrite, !!x.dryRun, x.cleanup || "trash"]);
@@ -54256,6 +54298,7 @@ function summary(st) {
   };
 }
 function putChunk(a, uploader) {
+  sweepStale();
   if (!ID_RE.test(a.job_id || "")) throw new Error("job_id\uB294 \uC601\uBB38\xB7\uC22B\uC790\xB7_\xB7- 1~64\uC790\uC5EC\uC57C \uD569\uB2C8\uB2E4");
   if (!Array.isArray(a.files) || a.files.length < 1 || a.files.length > LIMITS.maxFiles) throw new Error("files\uB294 1~" + LIMITS.maxFiles + "\uAC1C\uC5EC\uC57C \uD569\uB2C8\uB2E4");
   let total = 0;
@@ -54295,7 +54338,7 @@ function putChunk(a, uploader) {
   const fs0 = st.files[a.file_name];
   if (st.state !== "receiving" || fs0.done) {
     save(st);
-    return { ...summary(st), accepted: false, note: fs0.done ? "\uC774 \uD30C\uC77C\uC740 \uC774\uBBF8 \uB2E4 \uBC1B\uC558\uC2B5\uB2C8\uB2E4(\uC911\uBCF5 \uC870\uAC01\uC740 \uBB34\uC2DC)" : "\uC77C\uAC10\uC774 \uC774\uBBF8 \uB9C8\uBB34\uB9AC \uB2E8\uACC4\uC785\uB2C8\uB2E4" };
+    return { ...summary(st), accepted: false, note: st.state === "failed" ? "\uC77C\uAC10\uC774 \uC2E4\uD328\uD588\uAC70\uB098 \uB9CC\uB8CC\uB410\uC2B5\uB2C8\uB2E4(job_status\uC758 error \uCC38\uACE0) \u2014 \uC0C8 job_id\uB85C \uCC98\uC74C\uBD80\uD130 \uB2E4\uC2DC \uBCF4\uB0B4\uC138\uC694" : fs0.done ? "\uC774 \uD30C\uC77C\uC740 \uC774\uBBF8 \uB2E4 \uBC1B\uC558\uC2B5\uB2C8\uB2E4(\uC911\uBCF5 \uC870\uAC01\uC740 \uBB34\uC2DC)" : "\uC77C\uAC10\uC774 \uC774\uBBF8 \uB9C8\uBB34\uB9AC \uB2E8\uACC4\uC785\uB2C8\uB2E4" };
   }
   const dir = stagePath(a.job_id);
   fs.mkdirSync(dir, { recursive: true });
@@ -54369,11 +54412,18 @@ async function finalize2(st, uploader) {
   save(st);
 }
 function jobStatus(id) {
+  sweepStale();
   if (!ID_RE.test(id || "")) throw new Error("job_id\uAC00 \uC62C\uBC14\uB974\uC9C0 \uC54A\uC2B5\uB2C8\uB2E4");
   const st = load(id);
   if (!st) return { job_id: id, state: "unknown", note: "\uC774 job_id\uC758 \uAE30\uB85D\uC774 \uC5C6\uC2B5\uB2C8\uB2E4" };
   return { ...summary(st), created: st.created, updated: st.updated, staged_dir: st.staged_dir ?? null };
 }
+setInterval(() => {
+  try {
+    sweepStale();
+  } catch {
+  }
+}, 6e4).unref();
 
 // src/index.ts
 var server = new McpServer({ name: "mybox-mcp", version: "1.2.0" });
