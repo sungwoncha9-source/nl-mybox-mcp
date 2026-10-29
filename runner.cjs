@@ -1,3 +1,4 @@
+#!/usr/bin/env node
 // 고정 이름 작업 실행기 시험판 0.1 (격리 시험용). 임의 명령 없음. 작업 이름은 표에 있는 것만.
 const fs=require('fs'),path=require('path'),crypto=require('crypto'),cp=require('child_process');
 const ROOT=process.env.RUNNER_ROOT, APPROVED=process.env.RUNNER_APPROVED; // 승인 해시 목록은 연결 폴더 밖
