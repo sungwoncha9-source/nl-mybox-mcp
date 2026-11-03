@@ -7,9 +7,11 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { z } from 'zod';
 import axios from 'axios';
 import fs from 'node:fs';
+import crypto from 'node:crypto';
 import path from 'node:path';
 import { putChunk, jobStatus, type Uploader } from './jobs.js';
 
+declare const __HTTP__: boolean;   // 빌드 때 정해진다: stdio 번들 false(HTTP 코드 제거) / http 번들 true
 const server = new McpServer({ name: 'mybox-mcp', version: '1.2.0' });
 const BASE_URL = process.env.MYBOX_BASE_URL || 'https://open-api.mybox.naver.com/v1'; // 시험용으로만 바꾼다
 
@@ -187,7 +189,9 @@ async function uploadOne(filePath: string, parentId: string | undefined, isOverw
   if (parentId) body.parentId = parentId;
   const ticket: any = await makeRequest('POST', '/drive/files', body);
   const form = new FormData();
-  form.append('Filedata', new Blob([fs.readFileSync(filePath)]), fileName);
+  // 1.9.1: 큰 파일을 통째로 메모리에 올리지 않는다(Node 19.8+ 의 파일 기반 Blob). 없으면 예전처럼 읽는다
+  const blob: Blob = typeof (fs as any).openAsBlob === 'function' ? await (fs as any).openAsBlob(filePath) : new Blob([fs.readFileSync(filePath)]);
+  form.append('Filedata', blob, fileName);
   const res = await fetch(ticket.uploadUrl, { method: 'POST', body: form });
   const text = await res.text();
   if (!res.ok) throw new Error('upload failed ' + res.status + ' ' + text.slice(0, 200));
@@ -229,6 +233,33 @@ const jobUploader: Uploader = {
     return String(id);
   },
   upload: async (filePath, parentId, isOverwrite) => { await uploadOne(filePath, parentId, isOverwrite); },
+  list: async (parentId) => {   // 1.9.0: 폴더 안 파일 이름→{크기, 파일 ID}(읽기만)
+    const out = new Map<string, { size?: number; rid?: string }>(); let cursor: string | undefined;
+    for (let page = 0; page < 20; page++) {
+      const params: any = { count: 1000 }; if (cursor) params.cursor = cursor;
+      const r: any = await makeRequest('GET', parentId ? `/drive/folders/${parentId}/resources` : '/drive/resources', undefined, params);
+      for (const it of ((r && r.resources) || [])) {
+        if (!it || typeof it.name !== 'string' || it.type === 'folder') continue;
+        const sz = findKey(it, ['size', 'sizeBytes', 'fileSize', 'bytes', 'contentLength']); out.set(it.name, { size: sz == null ? undefined : Number(sz), rid: it.resourceId != null ? String(it.resourceId) : undefined });
+      }
+      cursor = r && r.responseMetaData && r.responseMetaData.nextCursor; if (!cursor) break;
+    }
+    return out;
+  },
+  // 1.9.1: 올린 파일을 내려받아 내용 sha256 계산(files_download_to_path와 같은 서명 주소 방식, 토큰을 보내지 않음). 선택 기능
+  contentSha256: async (resourceId) => {
+    const ticket: any = await makeRequest('GET', `/drive/files/${resourceId}/download`);
+    const res = await fetch(ticket.downloadUrl);
+    if (!res.ok || !res.body) throw new Error('download failed ' + res.status);
+    const h = crypto.createHash('sha256'); const reader = (res.body as any).getReader();
+    for (;;) { const { done, value } = await reader.read(); if (done) break; h.update(value); }
+    return h.digest('hex');
+  },
+  parentOf: async (resourceId) => {   // 1.9.1: 허용 목록 tree: 검사용(읽기만)
+    const r: any = await makeRequest('GET', `/drive/resources/${resourceId}`);
+    const pid = r && (r.parentId ?? findKey(r, ['parentId', 'parentResourceId']));
+    return pid ? String(pid) : null;
+  },
   verify: async (name, size, parentId) => {
     let cursor: string | undefined;
     for (let page = 0; page < 20; page++) {
@@ -243,7 +274,7 @@ const jobUploader: Uploader = {
   }
 };
 server.tool('job_put_chunk',
-  '일감 조각 하나를 받는다. 조각은 어떤 순서로 몇 개가 동시에 와도 된다(같은 조각을 다시 보내도 안전). 모든 파일이 다 모이면 PC가 스스로 올리기→크기 대조→정리(_trash로 이동)를 한다. wait_ms를 주면 일감을 완성한 호출(과 마무리 중에 들어온 호출)이 결과까지 최대 wait_ms 기다렸다 답한다(final:true면 최종 결과, false면 아직 마무리 중). 모든 호출에 같은 job_id와 files(이름·크기·sha256)를 싣는다. dry_run이 아니면 parent_id 필수. 조각은 1MiB 미만(base64 전 약 760KB 권장).',
+  '일감 조각 하나를 받는다. 조각은 어떤 순서로 몇 개가 동시에 와도 된다(같은 조각을 다시 보내도 안전). 모든 파일이 다 모이면 PC가 스스로 올리기→크기 대조→정리(_trash로 이동)를 한다. wait_ms를 주면 일감을 완성한 호출(과 마무리 중에 들어온 호출)이 결과까지 최대 wait_ms 기다렸다 답한다(final:true면 최종 결과, false면 아직 마무리 중). 모든 호출에 같은 job_id와 files(이름·크기·sha256)를 싣는다. dry_run이 아니면 parent_id 필수. 조각은 1MiB 미만(base64 전 약 760KB 권장). [1.9.0 bundle=pack1 지원] 파일이 많으면 bundle:\'pack1\'로 묶어 보내면 호출 수가 바이트 수에 비례한다.',
   {
     job_id: z.string().describe('영문·숫자·_·- 1~64자'),
     files: z.array(z.object({ name: z.string(), size: z.number().int(), sha256: z.string().describe('파일 전체의 sha256(16진수 64자)') })).describe('이 일감의 전체 파일 목록'),
@@ -255,7 +286,10 @@ server.tool('job_put_chunk',
     is_overwrite: z.boolean().optional(),
     dry_run: z.boolean().optional().describe('true면 MYBOX에는 올리지 않고 PC에서 모으기·sha256 대조까지만'),
     cleanup: z.enum(['trash', 'keep']).optional().describe('마무리 뒤 PC 사본: trash(기본, _trash로 이동) / keep'),
-    wait_ms: z.number().int().optional().describe('0~120000. 이 호출이 일감을 완성하면 마무리(올리기·대조) 결과까지 최대 이만큼 기다렸다 답한다')
+    wait_ms: z.number().int().optional().describe('0~120000. 이 호출이 일감을 완성하면 마무리(올리기·대조) 결과까지 최대 이만큼 기다렸다 답한다'),
+    bundle: z.enum(['pack1']).optional().describe("1.9.0: 'pack1'이면 files는 묶음 파일 하나뿐. 묶음 = 'NLP1'+목록길이(uint32 BE)+목록 JSON{entries:[{name,size,sha256,parent_id?}]}+파일 바이트들. 마지막 조각이 오면 PC가 풀어 안의 파일을 하나씩 올리고(같은 이름이 있으면 올리지 않음) 파일별 결과를 entries로 돌려준다. 호출 수가 파일 수가 아니라 바이트 수에 비례한다"),
+    verify_content: z.boolean().optional().describe('1.9.1: bundle 일감에서만. 올린 파일을 MYBOX에서 내려받아 내용 sha256까지 대조한다(느림·전송량 증가). 결과는 entries의 content_verified'),
+    upload_concurrency: z.number().int().optional().describe('1.9.1: bundle 일감에서만. 마무리 때 동시에 올릴 파일 수 1~4(기본 1)')
   },
   async (args) => out(await putChunk(args as any, jobUploader)));
 server.tool('job_status', '일감의 진행·마무리 결과를 읽는다(읽기 전용)', { job_id: z.string() },
@@ -263,6 +297,11 @@ server.tool('job_status', '일감의 진행·마무리 결과를 읽는다(읽�
   async (args) => out(jobStatus(args.job_id)));
 
 async function run() {
+  if (!(process.env.NL_JOB_ALLOWED_PARENTS || '').trim()) console.error('경고(1.9.1+): NL_JOB_ALLOWED_PARENTS가 비어 있어 job_put_chunk가 어느 MYBOX 폴더로든 올릴 수 있습니다. 시험 단계에서는 시험 미러 폴더 ID(또는 tree:<ID>)를 넣으세요.');
+  if (process.env.NL_TRANSPORT === 'http') {   // 시험용. HTTP 코드는 mybox-mcp-http 번들에만 들어간다(esbuild --define:__HTTP__=true). 기본(PC 적용용) stdio 번들에는 없다
+    if (__HTTP__) { const { runHttp } = await import('./http.js'); await runHttp(server); return; }
+    console.error('이 번들은 HTTP를 지원하지 않습니다(NL_TRANSPORT=http 는 mybox-mcp-http 번들에서만).'); process.exit(2);
+  }
   const transport = new StdioServerTransport();
   await server.connect(transport);
   console.error('MYBOX MCP Server running on stdio');

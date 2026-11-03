@@ -17224,7 +17224,7 @@ var require_form_data = __commonJS({
     var parseUrl2 = __require("url").parse;
     var fs3 = __require("fs");
     var Stream = __require("stream").Stream;
-    var crypto3 = __require("crypto");
+    var crypto4 = __require("crypto");
     var mime = require_mime_types();
     var asynckit = require_asynckit();
     var setToStringTag = require_es_set_tostringtag();
@@ -17433,7 +17433,7 @@ var require_form_data = __commonJS({
       return Buffer.concat([dataBuffer, Buffer.from(this._lastBoundary())]);
     };
     FormData3.prototype._generateBoundary = function() {
-      this._boundary = "--------------------------" + crypto3.randomBytes(12).toString("hex");
+      this._boundary = "--------------------------" + crypto4.randomBytes(12).toString("hex");
     };
     FormData3.prototype.getLengthSync = function() {
       var knownLength = this._overheadLength + this._valueLength;
@@ -18889,7 +18889,7 @@ var require_follow_redirects = __commonJS({
           options.headers[headerList[i]] = headerList[i + 1];
         }
       }
-      if (!isArray2(options.sensitiveHeaders)) {
+      if (!Array.isArray(options.sensitiveHeaders)) {
         options.sensitiveHeaders = [];
       }
       if (options.host) {
@@ -19145,9 +19145,6 @@ var require_follow_redirects = __commonJS({
       assert2(isString2(subdomain) && isString2(domain2));
       var dot = subdomain.length - domain2.length - 1;
       return dot > 0 && subdomain[dot] === "." && subdomain.endsWith(domain2);
-    }
-    function isArray2(value) {
-      return value instanceof Array;
     }
     function isString2(value) {
       return typeof value === "string" || value instanceof String;
@@ -54183,6 +54180,7 @@ var {
 
 // src/index.ts
 import fs2 from "node:fs";
+import crypto3 from "node:crypto";
 import path2 from "node:path";
 
 // src/jobs.ts
@@ -54190,14 +54188,97 @@ import fs from "node:fs";
 import path from "node:path";
 import crypto2 from "node:crypto";
 var ID_RE = /^[A-Za-z0-9_-]{1,64}$/;
+var normName = (n) => String(n).normalize("NFC").toLowerCase();
 var NAME_BAD = /[\\/:*?"<>|\u0000-\u001f]/;
 var B64 = /^[A-Za-z0-9+/]*={0,2}$/;
-var LIMITS = { maxChunk: 1024 * 1024, maxFile: 200 * 1024 * 1024, maxJob: 600 * 1024 * 1024, maxFiles: 40 };
+var LIMITS = { maxChunk: 1024 * 1024, maxFile: 200 * 1024 * 1024, maxJob: 600 * 1024 * 1024, maxFiles: 40, maxEntries: 500, maxManifest: 1024 * 1024, maxConc: 4 };
 function jobsRoot() {
   return process.env.NL_JOBS_DIR || "D:\\nodelab_work\\_jobs";
 }
 function checkName(n) {
   if (typeof n !== "string" || !n.trim() || n.length > 150 || NAME_BAD.test(n) || n === "." || n === ".." || n.startsWith(".") || /\.part$/i.test(n) || /^(state|job)\.json$/i.test(n)) throw new Error("\uC4F8 \uC218 \uC5C6\uB294 \uD30C\uC77C \uC774\uB984\uC785\uB2C8\uB2E4: " + n);
+}
+function parsePack(buf, total = buf.length) {
+  if (buf.length < 10 || buf.toString("latin1", 0, 4) !== "NLP1") throw new Error("\uBB36\uC74C \uD615\uC2DD\uC774 \uC544\uB2D9\uB2C8\uB2E4(\uBA38\uB9AC\uD45C NLP1 \uC5C6\uC74C)");
+  const m = buf.readUInt32BE(4);
+  if (m < 2 || m > LIMITS.maxManifest || 8 + m > total || 8 + m > buf.length) throw new Error("\uBB36\uC74C \uBAA9\uB85D \uAE38\uC774\uAC00 \uC62C\uBC14\uB974\uC9C0 \uC54A\uC2B5\uB2C8\uB2E4: " + m);
+  let man;
+  try {
+    man = JSON.parse(buf.toString("utf8", 8, 8 + m));
+  } catch {
+    throw new Error("\uBB36\uC74C \uBAA9\uB85D(JSON)\uC744 \uC77D\uC9C0 \uBABB\uD588\uC2B5\uB2C8\uB2E4");
+  }
+  const es = man && man.entries;
+  if (!Array.isArray(es) || es.length < 1 || es.length > LIMITS.maxEntries) throw new Error("\uBB36\uC74C \uC548 \uD30C\uC77C\uC740 1~" + LIMITS.maxEntries + "\uAC1C\uC5EC\uC57C \uD569\uB2C8\uB2E4");
+  const seen = /* @__PURE__ */ new Set();
+  let sum = 0;
+  const out2 = [];
+  for (const e of es) {
+    checkName(e && e.name);
+    if (e.parent_id != null && (typeof e.parent_id !== "string" || !e.parent_id.trim() || e.parent_id.length > 300 || /\s/.test(e.parent_id))) throw new Error("\uBB36\uC74C \uC548 parent_id\uAC00 \uC62C\uBC14\uB974\uC9C0 \uC54A\uC2B5\uB2C8\uB2E4: " + e.name);
+    const key = (e.parent_id || "") + "\0" + normName(e.name);
+    if (seen.has(key)) throw new Error("\uBB36\uC74C \uC548\uC5D0 \uAC19\uC740 \uD3F4\uB354\xB7\uAC19\uC740 \uC774\uB984\uC774 \uACB9\uCE69\uB2C8\uB2E4: " + e.name + (e.parent_id ? " (\uD3F4\uB354 " + e.parent_id + ")" : ""));
+    seen.add(key);
+    if (!Number.isInteger(e.size) || e.size <= 0) throw new Error("\uBB36\uC74C \uC548 \uD30C\uC77C \uD06C\uAE30\uAC00 \uC62C\uBC14\uB974\uC9C0 \uC54A\uC2B5\uB2C8\uB2E4: " + e.name);
+    if (typeof e.sha256 !== "string" || !/^[0-9a-f]{64}$/i.test(e.sha256)) throw new Error("\uBB36\uC74C \uC548 sha256\uC774 \uC62C\uBC14\uB974\uC9C0 \uC54A\uC2B5\uB2C8\uB2E4: " + e.name);
+    sum += e.size;
+    out2.push({ name: e.name, size: e.size, sha256: e.sha256.toLowerCase(), ...e.parent_id ? { parent_id: e.parent_id } : {} });
+  }
+  if (8 + m + sum !== total) throw new Error("\uBB36\uC74C \uD06C\uAE30\uAC00 \uBAA9\uB85D\uACFC \uB2E4\uB985\uB2C8\uB2E4: \uBAA9\uB85D \uD569\uACC4 " + sum + " / \uC2E4\uC81C " + (total - 8 - m));
+  return { entries: out2, start: 8 + m };
+}
+function sha256File(p) {
+  const h = crypto2.createHash("sha256"), fd = fs.openSync(p, "r"), buf = Buffer.allocUnsafe(1024 * 1024);
+  try {
+    for (; ; ) {
+      const n = fs.readSync(fd, buf, 0, buf.length, null);
+      if (n <= 0) break;
+      h.update(buf.subarray(0, n));
+    }
+  } finally {
+    fs.closeSync(fd);
+  }
+  return h.digest("hex");
+}
+function checkDiskFree(need) {
+  let free = null;
+  try {
+    const sf = fs.statfsSync(jobsRoot());
+    free = Number(sf.bavail) * Number(sf.bsize);
+  } catch {
+  }
+  if (free == null) {
+    try {
+      fs.mkdirSync(jobsRoot(), { recursive: true });
+      const sf = fs.statfsSync(jobsRoot());
+      free = Number(sf.bavail) * Number(sf.bsize);
+    } catch {
+      return;
+    }
+  }
+  const margin = (Number(process.env.NL_MIN_FREE_MB) || 64) * 1024 * 1024;
+  if (free < need + margin) throw new Error("disk_full: PC \uC791\uC5C5 \uD3F4\uB354\uC758 \uB0A8\uC740 \uACF5\uAC04\uC774 \uBAA8\uC790\uB78D\uB2C8\uB2E4(\uD544\uC694 \uC57D " + Math.ceil((need + margin) / 1048576) + " MiB, \uB0A8\uC74C " + Math.floor(free / 1048576) + " MiB). \uACF5\uAC04\uC744 \uBE44\uC6B4 \uB4A4 \uC0C8 job_id\uB85C \uB2E4\uC2DC \uBCF4\uB0B4\uC138\uC694");
+}
+var ALLOW_CACHE = /* @__PURE__ */ new Map();
+async function checkAllowed(parentId, uploader, cache = /* @__PURE__ */ new Map()) {
+  const raw = (process.env.NL_JOB_ALLOWED_PARENTS || "").split(",").map((x) => x.trim()).filter(Boolean);
+  if (!raw.length) return;
+  if (!parentId) throw new Error("not_allowed: \uC62C\uB9B4 \uD3F4\uB354\uAC00 \uC5C6\uC2B5\uB2C8\uB2E4(\uD5C8\uC6A9 \uBAA9\uB85D\uC774 \uCF1C\uC838 \uC788\uC2B5\uB2C8\uB2E4)");
+  const exact = new Set(raw.filter((x) => !x.startsWith("tree:"))), trees = raw.filter((x) => x.startsWith("tree:")).map((x) => x.slice(5));
+  if (cache.has(parentId)) {
+    if (cache.get(parentId)) return;
+    throw new Error("not_allowed: \uD5C8\uC6A9\uB418\uC9C0 \uC54A\uC740 \uD3F4\uB354\uC785\uB2C8\uB2E4: " + parentId);
+  }
+  let ok = exact.has(parentId) || trees.includes(parentId);
+  if (!ok && trees.length && uploader.parentOf) {
+    let cur = parentId;
+    for (let i = 0; i < 16 && cur && !ok; i++) {
+      cur = await uploader.parentOf(cur);
+      if (cur && trees.includes(cur)) ok = true;
+    }
+  }
+  cache.set(parentId, ok);
+  if (!ok) throw new Error("not_allowed: \uD5C8\uC6A9\uB418\uC9C0 \uC54A\uC740 \uD3F4\uB354\uC785\uB2C8\uB2E4: " + parentId);
 }
 var resultPath = (id) => path.join(jobsRoot(), "_results", id + ".json");
 var stagePath = (id) => path.join(jobsRoot(), id);
@@ -54267,7 +54348,7 @@ function sweepStale(now = Date.now()) {
 }
 function sameSpec(a, files, opts) {
   const norm = (f) => f.map((x) => x.name + "|" + x.size + "|" + x.sha256.toLowerCase()).sort().join(",");
-  const o = (x) => JSON.stringify([x.parentId || "", x.subfolder || "", !!x.isOverwrite, !!x.dryRun, x.cleanup || "trash"]);
+  const o = (x) => JSON.stringify([x.parentId || "", x.subfolder || "", !!x.isOverwrite, !!x.dryRun, x.cleanup || "trash", x.bundle || "", !!x.verifyContent, x.uploadConcurrency || 1]);
   return norm(a.files) === norm(files) && o(a.opts) === o(opts);
 }
 function merge3(r, s, e) {
@@ -54300,7 +54381,8 @@ function summary(st) {
     error: st.error ?? null,
     final: FINAL.has(st.state),
     subfolder: st.spec.opts.subfolder ?? null,
-    folder_id: st.folder_id ?? null
+    folder_id: st.folder_id ?? null,
+    ...st.spec.opts.bundle ? { bundle: st.spec.opts.bundle, entries: st.entries ? st.entries.map((e) => ({ id: e.id, name: e.name, size: e.size, target: e.target ?? e.parent_id ?? null, uploaded: e.uploaded ?? null, size_verified: e.size_verified ?? null, content_verified: e.content_verified ?? null, verified: e.verified ?? null, error: e.error ?? null })) : null } : {}
   };
 }
 async function waitFinal(id, waitMs) {
@@ -54321,12 +54403,14 @@ async function putChunk(a, uploader) {
   sweepStale();
   if (!ID_RE.test(a.job_id || "")) throw new Error("job_id\uB294 \uC601\uBB38\xB7\uC22B\uC790\xB7_\xB7- 1~64\uC790\uC5EC\uC57C \uD569\uB2C8\uB2E4");
   if (!Array.isArray(a.files) || a.files.length < 1 || a.files.length > LIMITS.maxFiles) throw new Error("files\uB294 1~" + LIMITS.maxFiles + "\uAC1C\uC5EC\uC57C \uD569\uB2C8\uB2E4");
+  if (a.bundle != null && a.bundle !== "pack1") throw new Error("bundle\uC740 'pack1'\uB9CC \uC4F8 \uC218 \uC788\uC2B5\uB2C8\uB2E4");
+  if (a.bundle && a.files.length !== 1) throw new Error("bundle\uC774\uBA74 files\uB294 \uBB36\uC74C \uD30C\uC77C \uD558\uB098\uC5EC\uC57C \uD569\uB2C8\uB2E4");
   let total = 0;
   const seen = /* @__PURE__ */ new Set();
   for (const f of a.files) {
     checkName(f.name);
-    if (seen.has(f.name.toLowerCase())) throw new Error("\uD30C\uC77C \uC774\uB984\uC774 \uACB9\uCE69\uB2C8\uB2E4: " + f.name);
-    seen.add(f.name.toLowerCase());
+    if (seen.has(normName(f.name))) throw new Error("\uD30C\uC77C \uC774\uB984\uC774 \uACB9\uCE69\uB2C8\uB2E4: " + f.name);
+    seen.add(normName(f.name));
     if (!Number.isInteger(f.size) || f.size <= 0 || f.size > LIMITS.maxFile) throw new Error("\uD30C\uC77C \uD06C\uAE30\uAC00 \uC62C\uBC14\uB974\uC9C0 \uC54A\uC2B5\uB2C8\uB2E4: " + f.name);
     if (!/^[0-9a-f]{64}$/i.test(f.sha256)) throw new Error("sha256\uC740 16\uC9C4\uC218 64\uAE00\uC790\uC5EC\uC57C \uD569\uB2C8\uB2E4: " + f.name);
     total += f.size;
@@ -54345,11 +54429,16 @@ async function putChunk(a, uploader) {
     if (/\.part$/i.test(a.subfolder) || a.subfolder.length > 100) throw new Error("\uC4F8 \uC218 \uC5C6\uB294 \uD558\uC704 \uD3F4\uB354 \uC774\uB984\uC785\uB2C8\uB2E4: " + a.subfolder);
     if (!a.parent_id) throw new Error("subfolder\uB97C \uC4F0\uB824\uBA74 parent_id(\uC0C1\uC704 \uD3F4\uB354 ID)\uAC00 \uD544\uC694\uD569\uB2C8\uB2E4");
   }
+  if (a.verify_content != null && typeof a.verify_content !== "boolean") throw new Error("verify_content\uB294 true/false\uC5EC\uC57C \uD569\uB2C8\uB2E4");
+  if (a.upload_concurrency != null && (!Number.isInteger(a.upload_concurrency) || a.upload_concurrency < 1 || a.upload_concurrency > LIMITS.maxConc)) throw new Error("upload_concurrency\uB294 1~" + LIMITS.maxConc + " \uC815\uC218\uC5EC\uC57C \uD569\uB2C8\uB2E4");
+  if ((a.verify_content || a.upload_concurrency) && !a.bundle) throw new Error("verify_content\xB7upload_concurrency\uB294 bundle \uC77C\uAC10\uC5D0\uC11C\uB9CC \uC501\uB2C8\uB2E4");
   const waitMs = a.wait_ms == null ? 0 : a.wait_ms;
   if (!Number.isInteger(waitMs) || waitMs < 0 || waitMs > WAIT_MAX_MS) throw new Error("wait_ms\uB294 0~" + WAIT_MAX_MS + " \uC815\uC218\uC5EC\uC57C \uD569\uB2C8\uB2E4");
-  const opts = { parentId: a.parent_id, subfolder: a.subfolder || void 0, isOverwrite: a.is_overwrite, dryRun: a.dry_run, cleanup: a.cleanup };
+  if (!a.dry_run) await checkAllowed(a.parent_id, uploader, ALLOW_CACHE);
+  const opts = { parentId: a.parent_id, subfolder: a.subfolder || void 0, isOverwrite: a.is_overwrite, dryRun: a.dry_run, cleanup: a.cleanup, bundle: a.bundle || void 0, verifyContent: a.verify_content || void 0, uploadConcurrency: a.upload_concurrency || void 0 };
   let st = load(a.job_id);
   if (!st) {
+    checkDiskFree(total * (a.bundle ? 2 : 1));
     st = {
       job_id: a.job_id,
       created: (/* @__PURE__ */ new Date()).toISOString(),
@@ -54385,7 +54474,7 @@ async function putChunk(a, uploader) {
   }
   fs0.ranges = merge3(fs0.ranges, a.offset, a.offset + buf.length);
   if (receivedOf(fs0) >= spec.size) {
-    const sha = crypto2.createHash("sha256").update(fs.readFileSync(part)).digest("hex");
+    const sha = sha256File(part);
     if (sha !== fs0.sha256) {
       fs0.ranges = [];
       fs0.error = "sha256 \uBD88\uC77C\uCE58(\uC804\uC1A1 \uC911 \uAE68\uC9D0): \uBC1B\uC740 " + sha + " / \uAE30\uB300 " + fs0.sha256;
@@ -54413,6 +54502,7 @@ async function putChunk(a, uploader) {
   return { ...summary(st), accepted: true, completed_by_this_call: true, ...w };
 }
 async function finalize2(st, uploader) {
+  if (st.spec.opts.bundle) return finalizeBundle(st, uploader);
   const dir = stagePath(st.job_id), o = st.spec.opts;
   try {
     if (!o.dryRun) {
@@ -54471,6 +54561,181 @@ setInterval(() => {
   } catch {
   }
 }, 6e4).unref();
+function effectiveDuplicates(entries, o) {
+  const eff = (e) => e.parent_id || (o.subfolder ? "new-subfolder" : o.parentId || "");
+  const seen = /* @__PURE__ */ new Map(), dup = [];
+  for (const e of entries) {
+    const k = eff(e) + "\0" + normName(e.name);
+    if (seen.has(k)) dup.push(seen.get(k) + " \u2194 " + e.name);
+    else seen.set(k, e.name);
+  }
+  return dup;
+}
+async function finalizeBundle(st, uploader) {
+  const dir = stagePath(st.job_id), o = st.spec.opts;
+  try {
+    const packFile = st.spec.files[0], packPath = path.join(dir, packFile.name);
+    const fd = fs.openSync(packPath, "r");
+    let entries, start;
+    try {
+      const h8 = Buffer.alloc(8);
+      if (fs.readSync(fd, h8, 0, 8, 0) !== 8) throw new Error("\uBB36\uC74C\uC774 \uB108\uBB34 \uC9E7\uC2B5\uB2C8\uB2E4");
+      const m = h8.readUInt32BE(4);
+      if (m < 2 || m > LIMITS.maxManifest) throw new Error("\uBB36\uC74C \uBAA9\uB85D \uAE38\uC774\uAC00 \uC62C\uBC14\uB974\uC9C0 \uC54A\uC2B5\uB2C8\uB2E4: " + m);
+      const hm = Buffer.alloc(8 + m);
+      fs.readSync(fd, hm, 0, 8 + m, 0);
+      ({ entries, start } = parsePack(hm, packFile.size));
+      st.entries = entries.map((e, i) => ({ id: i, name: e.name, size: e.size, sha256: e.sha256, ...e.parent_id ? { parent_id: e.parent_id } : {} }));
+      const edir = path.join(dir, "entries");
+      let pos = start, bad = 0;
+      const blk = Buffer.allocUnsafe(1024 * 1024);
+      for (const es of st.entries) {
+        const edirOne = path.join(edir, String(es.id));
+        fs.mkdirSync(edirOne, { recursive: true });
+        const outp = path.join(edirOne, es.name), ofd = fs.openSync(outp, "w"), hh = crypto2.createHash("sha256");
+        try {
+          let left = es.size;
+          while (left > 0) {
+            const n = fs.readSync(fd, blk, 0, Math.min(blk.length, left), pos);
+            if (n <= 0) throw new Error("\uBB36\uC74C \uB05D\uC744 \uB118\uC5B4 \uC77D\uC5C8\uC2B5\uB2C8\uB2E4");
+            hh.update(blk.subarray(0, n));
+            fs.writeSync(ofd, blk, 0, n);
+            pos += n;
+            left -= n;
+          }
+        } finally {
+          fs.closeSync(ofd);
+        }
+        if (hh.digest("hex") !== es.sha256) {
+          es.error = "sha256 \uBD88\uC77C\uCE58(\uBB36\uC74C \uC548\uC5D0\uC11C \uAE68\uC9D0)";
+          bad++;
+          try {
+            fs.unlinkSync(outp);
+          } catch {
+          }
+        } else es.unpacked = true;
+      }
+      save(st);
+      const dups = effectiveDuplicates(st.entries, o);
+      if (dups.length) {
+        for (const es of st.entries) if (dups.some((d) => d.includes(es.name))) es.error = "duplicate_target: \uC2E4\uC81C\uB85C \uC62C\uB77C\uAC08 \uD3F4\uB354\uC640 \uC774\uB984\uC774 \uB2E4\uB978 \uD56D\uBAA9\uACFC \uAC19\uC544 \uC77C\uAC10 \uC804\uCCB4\uB97C \uC62C\uB9AC\uAE30 \uC804\uC5D0 \uB9C9\uC558\uC2B5\uB2C8\uB2E4";
+        save(st);
+        throw new Error("duplicate_target: \uC2E4\uD6A8 \uBAA9\uC801 \uD3F4\uB354\xB7\uC774\uB984\uC774 \uACB9\uCE69\uB2C8\uB2E4 \u2014 \uC544\uBB34\uAC83\uB3C4 \uC62C\uB9AC\uC9C0 \uC54A\uC558\uC2B5\uB2C8\uB2E4: " + dups.slice(0, 3).join(" / "));
+      }
+      if (!o.dryRun) await uploadEntries(st, uploader, edir);
+      const failed = st.entries.filter((e) => e.error || !o.dryRun && !e.verified).length;
+      if (failed) throw new Error("\uBB36\uC74C \uC548 " + failed + "\uAC1C\uAC00 \uC62C\uB77C\uAC00\uC9C0 \uC54A\uC558\uAC70\uB098 \uD655\uC778\uB418\uC9C0 \uC54A\uC558\uC2B5\uB2C8\uB2E4 \u2014 \uD30C\uC77C\uBCC4 \uACB0\uACFC\uB294 entries\uB97C \uBCF4\uC138\uC694. PC \uC0AC\uBCF8\uC740 \uC9C0\uC6B0\uC9C0 \uC54A\uACE0 \uB0A8\uACBC\uC2B5\uB2C8\uB2E4: " + dir);
+    } finally {
+      fs.closeSync(fd);
+    }
+    st.state = o.dryRun ? "dry_run_done" : "done";
+    if (o.cleanup !== "keep") {
+      try {
+        fs.rmSync(path.join(dir, "entries"), { recursive: true, force: true });
+      } catch {
+      }
+      const trash = path.join(jobsRoot(), "_trash");
+      fs.mkdirSync(trash, { recursive: true });
+      const to = path.join(trash, st.job_id + "_" + Date.now());
+      fs.renameSync(dir, to);
+      st.staged_dir = to;
+    }
+  } catch (e) {
+    st.state = "failed";
+    st.error = String(e && e.message || e);
+  }
+  save(st);
+}
+async function uploadEntries(st, uploader, edir) {
+  const o = st.spec.opts, ents = st.entries;
+  let base = o.parentId;
+  if (o.subfolder) {
+    base = await uploader.createFolder(o.subfolder, o.parentId);
+    st.folder_id = base;
+    save(st);
+  }
+  const allowCache = /* @__PURE__ */ new Map();
+  const lists = /* @__PURE__ */ new Map();
+  const listOf = async (t, fresh = false) => {
+    const k = t || "";
+    if (fresh || !lists.has(k)) {
+      const raw = await uploader.list(t);
+      const m = /* @__PURE__ */ new Map();
+      for (const [nm, v] of raw) m.set(normName(nm), { ...v, name: v.name ?? nm });
+      lists.set(k, m);
+    }
+    return lists.get(k);
+  };
+  const todo = ents.filter((e) => e.unpacked);
+  for (const e of todo) {
+    e.target = e.parent_id || base;
+  }
+  for (const e of todo) {
+    try {
+      await checkAllowed(e.target, uploader, allowCache);
+    } catch (err) {
+      e.error = String(err.message || err);
+      e.unpacked = false;
+    }
+  }
+  const run2 = todo.filter((e) => e.unpacked);
+  for (const t of new Set(run2.map((e) => e.target))) await listOf(t);
+  const one = async (e) => {
+    try {
+      const ls = await listOf(e.target);
+      const ex = ls.get(normName(e.name));
+      if (ex && !o.isOverwrite) {
+        e.error = "exists: \uAC19\uC740 \uC774\uB984\uC774 \uC774\uBBF8 \uC788\uC5B4 \uC62C\uB9AC\uC9C0 \uC54A\uC558\uC2B5\uB2C8\uB2E4(MYBOX \uC774\uB984 " + ex.name + ", \uD06C\uAE30 " + ex.size + ")";
+        save(st);
+        return;
+      }
+      if (ex && ex.name !== e.name) {
+        e.error = "case_conflict: \uC774\uB984\uC774 \uB300\uC18C\uBB38\uC790\xB7\uAE00\uC790 \uAD6C\uC131\uB9CC \uB2E4\uB978 \uAE30\uC874 \uD30C\uC77C(" + ex.name + ")\uC774 \uC788\uC5B4 \uB36E\uC5B4\uC4F0\uAE30 \uB300\uC0C1\uC774 \uBAA8\uD638\uD574 \uC62C\uB9AC\uC9C0 \uC54A\uC558\uC2B5\uB2C8\uB2E4";
+        save(st);
+        return;
+      }
+      await uploader.upload(path.join(edir, String(e.id), e.name), e.target, !!o.isOverwrite);
+      e.uploaded = true;
+      save(st);
+    } catch (err) {
+      e.error = String(err && err.message || err).slice(0, 300);
+      save(st);
+    }
+  };
+  const conc = Math.max(1, Math.min(LIMITS.maxConc, o.uploadConcurrency || 1));
+  let qi = 0;
+  await Promise.all(Array.from({ length: conc }, async () => {
+    for (; ; ) {
+      const i = qi++;
+      if (i >= run2.length) return;
+      await one(run2[i]);
+    }
+  }));
+  const up = run2.filter((e) => e.uploaded);
+  for (const t of new Set(up.map((e) => e.target))) await listOf(t, true);
+  for (const e of up) {
+    const it = lists.get(e.target || "").get(normName(e.name));
+    e.size_verified = !!it && it.size === e.size;
+    if (!e.size_verified) {
+      e.error = it ? "\uD06C\uAE30\uAC00 \uB2E4\uB985\uB2C8\uB2E4: MYBOX " + it.size + " / \uAE30\uB300 " + e.size : "MYBOX \uBAA9\uB85D\uC5D0\uC11C \uBABB \uCC3E\uC74C";
+      e.verified = false;
+      continue;
+    }
+    if (o.verifyContent) {
+      try {
+        if (!uploader.contentSha256 || !it.rid) throw new Error("\uB0B4\uC6A9 \uB300\uC870 \uBD88\uAC00: MYBOX \uD30C\uC77C ID\uB97C \uC77D\uC9C0 \uBABB\uD588\uAC70\uB098 \uC11C\uBC84\uAC00 \uB0B4\uB824\uBC1B\uAE30\uB97C \uC9C0\uC6D0\uD558\uC9C0 \uC54A\uC2B5\uB2C8\uB2E4");
+        const got = await uploader.contentSha256(it.rid);
+        e.content_verified = got === e.sha256;
+        if (!e.content_verified) e.error = "\uB0B4\uC6A9(sha256)\uC774 \uB2E4\uB985\uB2C8\uB2E4: MYBOX " + got + " / \uAE30\uB300 " + e.sha256;
+      } catch (err) {
+        e.content_verified = false;
+        e.error = String(err && err.message || err).slice(0, 300);
+      }
+    }
+    e.verified = e.size_verified && (!o.verifyContent || e.content_verified === true);
+  }
+  save(st);
+}
 
 // src/index.ts
 var server = new McpServer({ name: "mybox-mcp", version: "1.2.0" });
@@ -54609,7 +54874,8 @@ async function uploadOne(filePath, parentId, isOverwrite) {
   if (parentId) body.parentId = parentId;
   const ticket = await makeRequest("POST", "/drive/files", body);
   const form = new FormData();
-  form.append("Filedata", new Blob([fs2.readFileSync(filePath)]), fileName);
+  const blob = typeof fs2.openAsBlob === "function" ? await fs2.openAsBlob(filePath) : new Blob([fs2.readFileSync(filePath)]);
+  form.append("Filedata", blob, fileName);
   const res = await fetch(ticket.uploadUrl, { method: "POST", body: form });
   const text = await res.text();
   if (!res.ok) throw new Error("upload failed " + res.status + " " + text.slice(0, 200));
@@ -54657,6 +54923,42 @@ var jobUploader = {
   upload: async (filePath, parentId, isOverwrite) => {
     await uploadOne(filePath, parentId, isOverwrite);
   },
+  list: async (parentId) => {
+    const out2 = /* @__PURE__ */ new Map();
+    let cursor;
+    for (let page = 0; page < 20; page++) {
+      const params = { count: 1e3 };
+      if (cursor) params.cursor = cursor;
+      const r = await makeRequest("GET", parentId ? `/drive/folders/${parentId}/resources` : "/drive/resources", void 0, params);
+      for (const it of r && r.resources || []) {
+        if (!it || typeof it.name !== "string" || it.type === "folder") continue;
+        const sz = findKey2(it, ["size", "sizeBytes", "fileSize", "bytes", "contentLength"]);
+        out2.set(it.name, { size: sz == null ? void 0 : Number(sz), rid: it.resourceId != null ? String(it.resourceId) : void 0 });
+      }
+      cursor = r && r.responseMetaData && r.responseMetaData.nextCursor;
+      if (!cursor) break;
+    }
+    return out2;
+  },
+  // 1.9.1: 올린 파일을 내려받아 내용 sha256 계산(files_download_to_path와 같은 서명 주소 방식, 토큰을 보내지 않음). 선택 기능
+  contentSha256: async (resourceId) => {
+    const ticket = await makeRequest("GET", `/drive/files/${resourceId}/download`);
+    const res = await fetch(ticket.downloadUrl);
+    if (!res.ok || !res.body) throw new Error("download failed " + res.status);
+    const h = crypto3.createHash("sha256");
+    const reader = res.body.getReader();
+    for (; ; ) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      h.update(value);
+    }
+    return h.digest("hex");
+  },
+  parentOf: async (resourceId) => {
+    const r = await makeRequest("GET", `/drive/resources/${resourceId}`);
+    const pid = r && (r.parentId ?? findKey2(r, ["parentId", "parentResourceId"]));
+    return pid ? String(pid) : null;
+  },
   verify: async (name, size, parentId) => {
     let cursor;
     for (let page = 0; page < 20; page++) {
@@ -54676,7 +54978,7 @@ var jobUploader = {
 };
 server.tool(
   "job_put_chunk",
-  "\uC77C\uAC10 \uC870\uAC01 \uD558\uB098\uB97C \uBC1B\uB294\uB2E4. \uC870\uAC01\uC740 \uC5B4\uB5A4 \uC21C\uC11C\uB85C \uBA87 \uAC1C\uAC00 \uB3D9\uC2DC\uC5D0 \uC640\uB3C4 \uB41C\uB2E4(\uAC19\uC740 \uC870\uAC01\uC744 \uB2E4\uC2DC \uBCF4\uB0B4\uB3C4 \uC548\uC804). \uBAA8\uB4E0 \uD30C\uC77C\uC774 \uB2E4 \uBAA8\uC774\uBA74 PC\uAC00 \uC2A4\uC2A4\uB85C \uC62C\uB9AC\uAE30\u2192\uD06C\uAE30 \uB300\uC870\u2192\uC815\uB9AC(_trash\uB85C \uC774\uB3D9)\uB97C \uD55C\uB2E4. wait_ms\uB97C \uC8FC\uBA74 \uC77C\uAC10\uC744 \uC644\uC131\uD55C \uD638\uCD9C(\uACFC \uB9C8\uBB34\uB9AC \uC911\uC5D0 \uB4E4\uC5B4\uC628 \uD638\uCD9C)\uC774 \uACB0\uACFC\uAE4C\uC9C0 \uCD5C\uB300 wait_ms \uAE30\uB2E4\uB838\uB2E4 \uB2F5\uD55C\uB2E4(final:true\uBA74 \uCD5C\uC885 \uACB0\uACFC, false\uBA74 \uC544\uC9C1 \uB9C8\uBB34\uB9AC \uC911). \uBAA8\uB4E0 \uD638\uCD9C\uC5D0 \uAC19\uC740 job_id\uC640 files(\uC774\uB984\xB7\uD06C\uAE30\xB7sha256)\uB97C \uC2E3\uB294\uB2E4. dry_run\uC774 \uC544\uB2C8\uBA74 parent_id \uD544\uC218. \uC870\uAC01\uC740 1MiB \uBBF8\uB9CC(base64 \uC804 \uC57D 760KB \uAD8C\uC7A5).",
+  "\uC77C\uAC10 \uC870\uAC01 \uD558\uB098\uB97C \uBC1B\uB294\uB2E4. \uC870\uAC01\uC740 \uC5B4\uB5A4 \uC21C\uC11C\uB85C \uBA87 \uAC1C\uAC00 \uB3D9\uC2DC\uC5D0 \uC640\uB3C4 \uB41C\uB2E4(\uAC19\uC740 \uC870\uAC01\uC744 \uB2E4\uC2DC \uBCF4\uB0B4\uB3C4 \uC548\uC804). \uBAA8\uB4E0 \uD30C\uC77C\uC774 \uB2E4 \uBAA8\uC774\uBA74 PC\uAC00 \uC2A4\uC2A4\uB85C \uC62C\uB9AC\uAE30\u2192\uD06C\uAE30 \uB300\uC870\u2192\uC815\uB9AC(_trash\uB85C \uC774\uB3D9)\uB97C \uD55C\uB2E4. wait_ms\uB97C \uC8FC\uBA74 \uC77C\uAC10\uC744 \uC644\uC131\uD55C \uD638\uCD9C(\uACFC \uB9C8\uBB34\uB9AC \uC911\uC5D0 \uB4E4\uC5B4\uC628 \uD638\uCD9C)\uC774 \uACB0\uACFC\uAE4C\uC9C0 \uCD5C\uB300 wait_ms \uAE30\uB2E4\uB838\uB2E4 \uB2F5\uD55C\uB2E4(final:true\uBA74 \uCD5C\uC885 \uACB0\uACFC, false\uBA74 \uC544\uC9C1 \uB9C8\uBB34\uB9AC \uC911). \uBAA8\uB4E0 \uD638\uCD9C\uC5D0 \uAC19\uC740 job_id\uC640 files(\uC774\uB984\xB7\uD06C\uAE30\xB7sha256)\uB97C \uC2E3\uB294\uB2E4. dry_run\uC774 \uC544\uB2C8\uBA74 parent_id \uD544\uC218. \uC870\uAC01\uC740 1MiB \uBBF8\uB9CC(base64 \uC804 \uC57D 760KB \uAD8C\uC7A5). [1.9.0 bundle=pack1 \uC9C0\uC6D0] \uD30C\uC77C\uC774 \uB9CE\uC73C\uBA74 bundle:'pack1'\uB85C \uBB36\uC5B4 \uBCF4\uB0B4\uBA74 \uD638\uCD9C \uC218\uAC00 \uBC14\uC774\uD2B8 \uC218\uC5D0 \uBE44\uB840\uD55C\uB2E4.",
   {
     job_id: external_exports.string().describe("\uC601\uBB38\xB7\uC22B\uC790\xB7_\xB7- 1~64\uC790"),
     files: external_exports.array(external_exports.object({ name: external_exports.string(), size: external_exports.number().int(), sha256: external_exports.string().describe("\uD30C\uC77C \uC804\uCCB4\uC758 sha256(16\uC9C4\uC218 64\uC790)") })).describe("\uC774 \uC77C\uAC10\uC758 \uC804\uCCB4 \uD30C\uC77C \uBAA9\uB85D"),
@@ -54688,7 +54990,10 @@ server.tool(
     is_overwrite: external_exports.boolean().optional(),
     dry_run: external_exports.boolean().optional().describe("true\uBA74 MYBOX\uC5D0\uB294 \uC62C\uB9AC\uC9C0 \uC54A\uACE0 PC\uC5D0\uC11C \uBAA8\uC73C\uAE30\xB7sha256 \uB300\uC870\uAE4C\uC9C0\uB9CC"),
     cleanup: external_exports.enum(["trash", "keep"]).optional().describe("\uB9C8\uBB34\uB9AC \uB4A4 PC \uC0AC\uBCF8: trash(\uAE30\uBCF8, _trash\uB85C \uC774\uB3D9) / keep"),
-    wait_ms: external_exports.number().int().optional().describe("0~120000. \uC774 \uD638\uCD9C\uC774 \uC77C\uAC10\uC744 \uC644\uC131\uD558\uBA74 \uB9C8\uBB34\uB9AC(\uC62C\uB9AC\uAE30\xB7\uB300\uC870) \uACB0\uACFC\uAE4C\uC9C0 \uCD5C\uB300 \uC774\uB9CC\uD07C \uAE30\uB2E4\uB838\uB2E4 \uB2F5\uD55C\uB2E4")
+    wait_ms: external_exports.number().int().optional().describe("0~120000. \uC774 \uD638\uCD9C\uC774 \uC77C\uAC10\uC744 \uC644\uC131\uD558\uBA74 \uB9C8\uBB34\uB9AC(\uC62C\uB9AC\uAE30\xB7\uB300\uC870) \uACB0\uACFC\uAE4C\uC9C0 \uCD5C\uB300 \uC774\uB9CC\uD07C \uAE30\uB2E4\uB838\uB2E4 \uB2F5\uD55C\uB2E4"),
+    bundle: external_exports.enum(["pack1"]).optional().describe("1.9.0: 'pack1'\uC774\uBA74 files\uB294 \uBB36\uC74C \uD30C\uC77C \uD558\uB098\uBFD0. \uBB36\uC74C = 'NLP1'+\uBAA9\uB85D\uAE38\uC774(uint32 BE)+\uBAA9\uB85D JSON{entries:[{name,size,sha256,parent_id?}]}+\uD30C\uC77C \uBC14\uC774\uD2B8\uB4E4. \uB9C8\uC9C0\uB9C9 \uC870\uAC01\uC774 \uC624\uBA74 PC\uAC00 \uD480\uC5B4 \uC548\uC758 \uD30C\uC77C\uC744 \uD558\uB098\uC529 \uC62C\uB9AC\uACE0(\uAC19\uC740 \uC774\uB984\uC774 \uC788\uC73C\uBA74 \uC62C\uB9AC\uC9C0 \uC54A\uC74C) \uD30C\uC77C\uBCC4 \uACB0\uACFC\uB97C entries\uB85C \uB3CC\uB824\uC900\uB2E4. \uD638\uCD9C \uC218\uAC00 \uD30C\uC77C \uC218\uAC00 \uC544\uB2C8\uB77C \uBC14\uC774\uD2B8 \uC218\uC5D0 \uBE44\uB840\uD55C\uB2E4"),
+    verify_content: external_exports.boolean().optional().describe("1.9.1: bundle \uC77C\uAC10\uC5D0\uC11C\uB9CC. \uC62C\uB9B0 \uD30C\uC77C\uC744 MYBOX\uC5D0\uC11C \uB0B4\uB824\uBC1B\uC544 \uB0B4\uC6A9 sha256\uAE4C\uC9C0 \uB300\uC870\uD55C\uB2E4(\uB290\uB9BC\xB7\uC804\uC1A1\uB7C9 \uC99D\uAC00). \uACB0\uACFC\uB294 entries\uC758 content_verified"),
+    upload_concurrency: external_exports.number().int().optional().describe("1.9.1: bundle \uC77C\uAC10\uC5D0\uC11C\uB9CC. \uB9C8\uBB34\uB9AC \uB54C \uB3D9\uC2DC\uC5D0 \uC62C\uB9B4 \uD30C\uC77C \uC218 1~4(\uAE30\uBCF8 1)")
   },
   async (args) => out(await putChunk(args, jobUploader))
 );
@@ -54700,6 +55005,16 @@ server.tool(
   async (args) => out(jobStatus(args.job_id))
 );
 async function run() {
+  if (!(process.env.NL_JOB_ALLOWED_PARENTS || "").trim()) console.error("\uACBD\uACE0(1.9.1+): NL_JOB_ALLOWED_PARENTS\uAC00 \uBE44\uC5B4 \uC788\uC5B4 job_put_chunk\uAC00 \uC5B4\uB290 MYBOX \uD3F4\uB354\uB85C\uB4E0 \uC62C\uB9B4 \uC218 \uC788\uC2B5\uB2C8\uB2E4. \uC2DC\uD5D8 \uB2E8\uACC4\uC5D0\uC11C\uB294 \uC2DC\uD5D8 \uBBF8\uB7EC \uD3F4\uB354 ID(\uB610\uB294 tree:<ID>)\uB97C \uB123\uC73C\uC138\uC694.");
+  if (process.env.NL_TRANSPORT === "http") {
+    if (false) {
+      const { runHttp } = await null;
+      await runHttp(server);
+      return;
+    }
+    console.error("\uC774 \uBC88\uB4E4\uC740 HTTP\uB97C \uC9C0\uC6D0\uD558\uC9C0 \uC54A\uC2B5\uB2C8\uB2E4(NL_TRANSPORT=http \uB294 mybox-mcp-http \uBC88\uB4E4\uC5D0\uC11C\uB9CC).");
+    process.exit(2);
+  }
   const transport = new StdioServerTransport();
   await server.connect(transport);
   console.error("MYBOX MCP Server running on stdio");
