@@ -54,6 +54,14 @@ PC 경로로 바로 받기/올리기 도구 2개(files_download_to_path, files_u
 - HTTP로는 일감 도구(`NL_HTTP_TOOLS`, 기본 `job_put_chunk,job_status`)만 열고 나머지(삭제·이동 등)는 비활성화한다.
 - 세션은 하나다(한 번에 클라이언트 하나). 외부 공개·인증 방식·비용은 이 모듈이 정하지 않는다.
 
+## 영구 삭제 차단 가드 (v1.9.3)
+지침(영구 삭제·휴지통 비우기 금지)을 서버가 받쳐 준다. 환경변수·인자로 풀 수 없다.
+- 거부 도구 3개: `files_trash_clean`(비우기), `files_trash_clean_resourceId`(개별 영구 삭제), `dms_trash_routine`(휴지통 자동 삭제 주기 설정 — MYBOX가 나중에 영구 삭제하게 되므로 0 포함 모두 거부). 목록에는 `[차단됨]`으로 남고, 호출하면 이유를 담은 오류 응답만 오며 **MYBOX에는 요청을 보내지 않는다**.
+- 이중 장치: 모든 요청이 지나는 `makeRequest`에서도 `DELETE /drive/trash*`, `trashAutoDeleteDays`가 든 `/drive/storage` 쓰기를 막는다(나중에 도구가 늘어도 같은 길이면 막힘).
+- 그대로 되는 것: `files_delete`(휴지통 이동), `dms_trash_list`, `files_trash_restore`, 읽기 전부.
+- 확인하지 못한 것 (B): `files_delete`가 어떤 조건에서도 휴지통을 거친다는 것은 도구 설명과 공식 문서 기록에 의존한다(실제 MYBOX로는 시험하지 않았다). `isOverwrite:true`(files_copy·files_move·files_trash_restore·files_upload_from_path·job_put_chunk의 `is_overwrite`)로 덮어쓸 때 기존 파일이 휴지통에 남는지도 미확인이며 이번 가드에는 포함하지 않았다.
+- 시험: `node test/guard.mjs <번들>` (가짜 MYBOX 30건). 중앙 가드만 단독으로 보려면 도구 쪽 거부를 뺀 변형 번들로 같은 시험을 돌린다.
+
 ## 번들 두 가지 (1.9.2)
 - `mybox-mcp.mjs`: **PC 적용용 stdio 번들.** HTTP 코드가 들어 있지 않다(`--define:__HTTP__=false`). `NL_TRANSPORT=http`를 주면 안내 후 종료한다.
 - `mybox-mcp-http.mjs`: HTTP 시험용(`--define:__HTTP__=true`). PC 적용에는 쓰지 않는다.

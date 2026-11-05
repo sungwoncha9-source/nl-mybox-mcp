@@ -54738,7 +54738,7 @@ async function uploadEntries(st, uploader, edir) {
 }
 
 // src/index.ts
-var server = new McpServer({ name: "mybox-mcp", version: "1.2.0" });
+var server = new McpServer({ name: "mybox-mcp", version: "1.9.3" });
 var BASE_URL = process.env.MYBOX_BASE_URL || "https://open-api.mybox.naver.com/v1";
 function getAuthHeaders() {
   const token = process.env.MYBOX_ACCESS_TOKEN;
@@ -54747,7 +54747,19 @@ function getAuthHeaders() {
   }
   return { Authorization: `Bearer ${token}`, "Content-Type": "application/json" };
 }
+var DENIED_NOTE = "\uC601\uAD6C \uC0AD\uC81C\xB7\uD734\uC9C0\uD1B5 \uBE44\uC6B0\uAE30\xB7\uD734\uC9C0\uD1B5 \uC790\uB3D9 \uC0AD\uC81C \uC124\uC815\uC740 \uC774 \uC11C\uBC84\uC5D0\uC11C \uAE08\uC9C0\uC785\uB2C8\uB2E4(\uC9C0\uCE68 0.3). \uC544\uBB34\uAC83\uB3C4 \uC9C0\uC6B0\uC9C0 \uC54A\uC558\uACE0 MYBOX\uC5D0\uB294 \uC694\uCCAD\uC744 \uBCF4\uB0B4\uC9C0 \uC54A\uC558\uC2B5\uB2C8\uB2E4. \uD544\uC694\uD558\uBA74 MYBOX \uC571\uC5D0\uC11C \uC9C1\uC811 \uD558\uC138\uC694.";
+function isPermanentDeleteRequest(method, endpoint, data) {
+  const m = String(method).toUpperCase();
+  const p = String(endpoint).split("?")[0].replace(/\/+$/, "");
+  if (m === "DELETE" && (p === "/drive/trash" || p.startsWith("/drive/trash/"))) return true;
+  if ((m === "PATCH" || m === "PUT" || m === "POST") && p === "/drive/storage" && data && typeof data === "object" && "trashAutoDeleteDays" in data) return true;
+  return false;
+}
+function denyTool(tool) {
+  return { isError: true, content: [{ type: "text", text: JSON.stringify({ denied: true, tool, reason: DENIED_NOTE }, null, 2) }] };
+}
 async function makeRequest(method, endpoint, data, params) {
+  if (isPermanentDeleteRequest(method, endpoint, data)) throw new Error("DENIED: " + DENIED_NOTE);
   const url3 = `${BASE_URL}${endpoint}`;
   try {
     const response = await axios_default({ method, url: url3, headers: getAuthHeaders(), data, params });
@@ -54838,13 +54850,13 @@ server.tool("files_trash_restore", "\uD734\uC9C0\uD1B5 \uD30C\uC77C/\uD3F4\uB354
   resourceId: idParam("ID"),
   isOverwrite: external_exports.boolean().optional()
 }, async ({ resourceId, ...body }) => out(await makeRequest("POST", `/drive/trash/${resourceId}/restore`, body)));
-server.tool("files_trash_clean_resourceId", "\uD734\uC9C0\uD1B5\uC758 \uD30C\uC77C/\uD3F4\uB354 \uD558\uB098\uB97C \uC601\uAD6C \uC0AD\uC81C (\uB418\uB3CC\uB9B4 \uC218 \uC5C6\uC74C)", {
+server.tool("files_trash_clean_resourceId", "[\uCC28\uB2E8\uB428] \uD734\uC9C0\uD1B5\uC758 \uD30C\uC77C/\uD3F4\uB354 \uD558\uB098\uB97C \uC601\uAD6C \uC0AD\uC81C \u2014 \uC774 \uC11C\uBC84\uC5D0\uC11C\uB294 \uD56D\uC0C1 \uAC70\uBD80\uB41C\uB2E4", {
   resourceId: idParam("ID")
-}, async (args) => out(await makeRequest("DELETE", `/drive/trash/${args.resourceId}`)));
-server.tool("files_trash_clean", "\uD734\uC9C0\uD1B5 \uC804\uCCB4 \uC601\uAD6C \uC0AD\uC81C \u2014 \uBE44\uC6B0\uAE30 (\uB418\uB3CC\uB9B4 \uC218 \uC5C6\uC74C)", {}, async () => out(await makeRequest("DELETE", "/drive/trash")));
-server.tool("dms_trash_routine", "\uD734\uC9C0\uD1B5 \uC790\uB3D9 \uC0AD\uC81C \uC8FC\uAE30 \uC124\uC815 (0=\uB054, 5, 15, 30, 50\uC77C)", {
+}, async () => denyTool("files_trash_clean_resourceId"));
+server.tool("files_trash_clean", "[\uCC28\uB2E8\uB428] \uD734\uC9C0\uD1B5 \uC804\uCCB4 \uC601\uAD6C \uC0AD\uC81C(\uBE44\uC6B0\uAE30) \u2014 \uC774 \uC11C\uBC84\uC5D0\uC11C\uB294 \uD56D\uC0C1 \uAC70\uBD80\uB41C\uB2E4", {}, async () => denyTool("files_trash_clean"));
+server.tool("dms_trash_routine", "[\uCC28\uB2E8\uB428] \uD734\uC9C0\uD1B5 \uC790\uB3D9 \uC0AD\uC81C \uC8FC\uAE30 \uC124\uC815 \u2014 \uC774 \uC11C\uBC84\uC5D0\uC11C\uB294 \uD56D\uC0C1 \uAC70\uBD80\uB41C\uB2E4", {
   trashAutoDeleteDays: external_exports.number()
-}, async (args) => out(await makeRequest("PATCH", "/drive/storage", args)));
+}, async () => denyTool("dms_trash_routine"));
 server.tool("files_download_to_path", "\uD30C\uC77C\uC744 PC\uC758 \uC9C0\uC815 \uD3F4\uB354\uC5D0 \uBC14\uB85C \uB0B4\uB824\uBC1B\uAE30 (\uAC19\uC740 \uC774\uB984\xB7\uAC19\uC740 \uD06C\uAE30\uBA74 \uAC74\uB108\uB700)", {
   resourceId: idParam("\uD30C\uC77C ID"),
   destDir: external_exports.string().describe("\uC800\uC7A5\uD560 PC \uD3F4\uB354 (\uC608: D:\\nodelab_temp\\blog-writing\\00-\uBC1B\uAE30)"),

@@ -12,7 +12,7 @@ import path from 'node:path';
 import { putChunk, jobStatus, type Uploader } from './jobs.js';
 
 declare const __HTTP__: boolean;   // 빌드 때 정해진다: stdio 번들 false(HTTP 코드 제거) / http 번들 true
-const server = new McpServer({ name: 'mybox-mcp', version: '1.2.0' });
+const server = new McpServer({ name: 'mybox-mcp', version: '1.9.3' });
 const BASE_URL = process.env.MYBOX_BASE_URL || 'https://open-api.mybox.naver.com/v1'; // 시험용으로만 바꾼다
 
 function getAuthHeaders() {
@@ -23,7 +23,24 @@ function getAuthHeaders() {
   return { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' };
 }
 
+// 1.9.3 영구 삭제 차단 가드 (지침: 영구 삭제·휴지통 비우기는 어떤 경우에도 금지). 환경변수·인자로 풀 수 없다.
+// 도구 쪽 거부(denyTool)와 별개로, 모든 요청이 지나는 이 길에서도 한 번 더 막는다(나중에 도구가 늘어도 같은 길이면 막힘).
+//  · DELETE /drive/trash 와 /drive/trash/{id}: 휴지통 비우기·개별 영구 삭제
+//  · PATCH /drive/storage 에 trashAutoDeleteDays: 휴지통 자동 삭제 주기(MYBOX가 나중에 알아서 영구 삭제하게 됨)
+const DENIED_NOTE = '영구 삭제·휴지통 비우기·휴지통 자동 삭제 설정은 이 서버에서 금지입니다(지침 0.3). 아무것도 지우지 않았고 MYBOX에는 요청을 보내지 않았습니다. 필요하면 MYBOX 앱에서 직접 하세요.';
+function isPermanentDeleteRequest(method: string, endpoint: string, data?: any): boolean {
+  const m = String(method).toUpperCase();
+  const p = String(endpoint).split('?')[0].replace(/\/+$/, '');
+  if (m === 'DELETE' && (p === '/drive/trash' || p.startsWith('/drive/trash/'))) return true;
+  if ((m === 'PATCH' || m === 'PUT' || m === 'POST') && p === '/drive/storage' && data && typeof data === 'object' && 'trashAutoDeleteDays' in data) return true;
+  return false;
+}
+function denyTool(tool: string) {
+  return { isError: true as const, content: [{ type: 'text' as const, text: JSON.stringify({ denied: true, tool, reason: DENIED_NOTE }, null, 2) }] };
+}
+
 async function makeRequest(method: string, endpoint: string, data?: any, params?: any) {
+  if (isPermanentDeleteRequest(method, endpoint, data)) throw new Error('DENIED: ' + DENIED_NOTE);
   const url = `${BASE_URL}${endpoint}`;
   try {
     const response = await axios({ method, url, headers: getAuthHeaders(), data, params });
@@ -148,14 +165,15 @@ server.tool('files_trash_restore', '휴지통 파일/폴더 복원(원래 위치
   resourceId: idParam('ID'),
   isOverwrite: z.boolean().optional()
 }, async ({ resourceId, ...body }) => out(await makeRequest('POST', `/drive/trash/${resourceId}/restore`, body)));
-server.tool('files_trash_clean_resourceId', '휴지통의 파일/폴더 하나를 영구 삭제 (되돌릴 수 없음)', {
+// 1.9.3: 아래 셋은 목록에는 남기되(호출하면 이유를 알려 주려고) 항상 거부한다. 요청은 MYBOX로 가지 않는다.
+server.tool('files_trash_clean_resourceId', '[차단됨] 휴지통의 파일/폴더 하나를 영구 삭제 — 이 서버에서는 항상 거부된다', {
   resourceId: idParam('ID')
-}, async (args) => out(await makeRequest('DELETE', `/drive/trash/${args.resourceId}`)));
-server.tool('files_trash_clean', '휴지통 전체 영구 삭제 — 비우기 (되돌릴 수 없음)', {}, async () =>
-  out(await makeRequest('DELETE', '/drive/trash')));
-server.tool('dms_trash_routine', '휴지통 자동 삭제 주기 설정 (0=끔, 5, 15, 30, 50일)', {
+}, async () => denyTool('files_trash_clean_resourceId'));
+server.tool('files_trash_clean', '[차단됨] 휴지통 전체 영구 삭제(비우기) — 이 서버에서는 항상 거부된다', {}, async () =>
+  denyTool('files_trash_clean'));
+server.tool('dms_trash_routine', '[차단됨] 휴지통 자동 삭제 주기 설정 — 이 서버에서는 항상 거부된다', {
   trashAutoDeleteDays: z.number()
-}, async (args) => out(await makeRequest('PATCH', '/drive/storage', args)));
+}, async () => denyTool('dms_trash_routine'));
 
 // ---- 추가: PC 경로로 바로 받기/올리기 --------------------------------------
 server.tool('files_download_to_path', '파일을 PC의 지정 폴더에 바로 내려받기 (같은 이름·같은 크기면 건너뜀)', {
