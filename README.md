@@ -67,3 +67,15 @@ PC 경로로 바로 받기/올리기 도구 2개(files_download_to_path, files_u
 - `mybox-mcp-http.mjs`: HTTP 시험용(`--define:__HTTP__=true`). PC 적용에는 쓰지 않는다.
 - 빌드: `esbuild src/index.ts --bundle --platform=node --format=esm --target=node20 --define:__HTTP__=<false|true> --banner:js="import{createRequire as __cr}from'module';const require=__cr(import.meta.url);" --outfile=<파일>` (패키지: sdk 1.32.0, axios 1.20.0, zod 4.6.7).
 - 시작 때 `NL_JOB_ALLOWED_PARENTS`가 비어 있으면 stderr에 경고를 남긴다(비어 있으면 어느 폴더로든 올릴 수 있다).
+
+## 1.10.0 — 클라우드(웹) 연결용: 연결마다 세션 + OAuth 출입증 검사 (가지 `w1/oauth-1.10.0`, 시험판)
+PC에서 쓰는 stdio 동작(도구 24개)은 바뀌지 않는다. 바뀐 것은 HTTP 문(`mybox-mcp-http.mjs`, `NL_TRANSPORT=http`)뿐이다.
+- **연결마다 세션**: 1.9.x는 서버 하나에 연결 하나뿐이라 두 번째 클라이언트가 `Server already initialized`로 거절됐다. 이제 연결마다 서버를 새로 만든다(`buildServer`). 세션은 처음 연 사용자에게 묶이고(남이 쓰면 403), 쉬는 세션은 닫으며(`NL_SESSION_IDLE_SEC`, 기본 1800), 동시 세션 수 상한이 있다(`NL_SESSION_MAX`, 기본 50).
+- **`NL_AUTH=oauth`**: 이 서버는 출입증(JWT)을 검사만 하고, 로그인·발급은 바깥 인증 서비스(Auth0 등)가 한다.
+  - 필수: `NL_PUBLIC_URL`(https 공개 주소), `NL_OAUTH_ISSUER`(예: `https://<tenant>.auth0.com/`), `NL_OAUTH_ALLOWED_SUBS`(통과시킬 사용자 sub, 쉼표. 비면 시작 안 함).
+  - 선택: `NL_OAUTH_AUDIENCE`(기본 `<공개 주소>/mcp`, 인증 서비스의 API 식별자와 같아야 함), `NL_OAUTH_JWKS_URL`(기본 발급자 `/.well-known/jwks.json`), `NL_OAUTH_REQUIRED_SCOPE`.
+  - 검사: 서명(JWKS, RS256/ES256) · 발급자 · 대상 · 만료 · 허용 사용자. 고정 토큰(`NL_HTTP_TOKEN`)은 oauth 모드에서 통하지 않는다.
+  - 출입증이 없거나 틀리면 401 + `WWW-Authenticate: Bearer resource_metadata="…"`. 안내 주소 `/.well-known/oauth-protected-resource(/mcp)`(RFC 9728)는 인증 없이 읽힌다.
+  - `NL_AUTH=token`(기본)은 1.9.x와 같다.
+- Host 허용에 `NL_PUBLIC_URL`의 이름이 더해진다. 폴더 지킴이·`/api/v1`·영구 삭제 차단은 그대로 앞에 있다.
+- 다시 묶기: `build.sh`. 시험(모두 가짜 MYBOX·가짜 인증 서버): `test/oauth.mjs`(28) · `test/folderguard.mjs`(44) · `test/rest.mjs`(27) · `test/http.v193.mjs`(16) · `test/guard.mjs`(영구 삭제 30) · `test/jobs.mjs`(58) · `test/bundle.mjs`(55).

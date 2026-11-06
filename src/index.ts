@@ -9,10 +9,43 @@ import axios from 'axios';
 import fs from 'node:fs';
 import crypto from 'node:crypto';
 import path from 'node:path';
-import { putChunk, jobStatus, type Uploader } from './jobs.js';
+import { putChunk, jobStatus, checkAllowed, type Uploader } from './jobs.js';
+
+// ---- 1.9.3 시험: 바깥 공개(HTTP·클라우드)용 폴더 지킴이 ----------------------------------------------
+// 켜지는 때: NL_TRANSPORT=http 또는 NL_TOOL_GUARD=1. 기본(PC stdio)에서는 꺼져 있어 지금 동작과 같다.
+// 켜지면: ① 허용 목록(NL_JOB_ALLOWED_PARENTS)이 비면 시작하지 않는다 ② ID 모양을 먼저 본다(경로 조작 차단)
+// ③ 목록·폴더 만들기·복사·이동은 출발지와 목적지가 모두 허용 범위 안이어야 한다 ④ 허용 폴더 자체는 옮기거나 복사하지 않는다
+const GUARD = process.env.NL_TRANSPORT === 'http' || process.env.NL_TOOL_GUARD === '1';
+export const GUARDED_TOOLS = ['job_put_chunk', 'job_status', 'dms_list', 'files_copy', 'files_move', 'files_create_folder'];
+const RID_RE = /^[A-Za-z0-9+=_-]{1,300}$/;
+const deny = (m: string) => { throw new Error('not_allowed: ' + m); };
+function rid(v: unknown, what: string): string { if (typeof v !== 'string' || !RID_RE.test(v)) deny(what + ' 형식이 올바르지 않습니다'); return v as string; }
+function allowRoots(): string[] { return (process.env.NL_JOB_ALLOWED_PARENTS || '').split(',').map(x => x.trim()).filter(Boolean).map(x => x.startsWith('tree:') ? x.slice(5) : x); }
+const OK_UNTIL = new Map<string, number>();   // 통과한 폴더만 60초 기억(거절은 기억하지 않음)
+async function folderAllowed(id: unknown, what: string) {
+  const f = rid(id, what); const t = OK_UNTIL.get(f); if (t && t > Date.now()) return;
+  try { await checkAllowed(f, jobUploader, new Map()); } catch (e: any) { deny(what + ' 허용 범위 밖: ' + f + (String(e.message).startsWith('not_allowed') ? '' : ' (' + String(e.message).slice(0, 80) + ')')); }
+  OK_UNTIL.set(f, Date.now() + 60000);
+}
+async function insideAllowed(id: unknown, what: string) {
+  const r = rid(id, what);
+  if (allowRoots().includes(r)) deny('허용 폴더 자체는 옮기거나 복사할 수 없습니다: ' + r);
+  let p: string | null = null; try { p = await jobUploader.parentOf!(r); } catch (e: any) { deny(what + ' 위치를 읽지 못했습니다 (' + String(e.message).slice(0, 80) + ')'); }
+  if (!p) deny(what + ' 상위 폴더가 없습니다'); await folderAllowed(p, what + '의 상위 폴더');
+}
+
 
 declare const __HTTP__: boolean;   // 빌드 때 정해진다: stdio 번들 false(HTTP 코드 제거) / http 번들 true
-const server = new McpServer({ name: 'mybox-mcp', version: '1.9.3' });
+// 1.10.0 시험: 도구 정의를 한 번만 적어 두고, 연결(세션)마다 새 서버를 만들어 같은 도구를 붙인다.
+// 이유(A, 11-07 격리 시험): 서버 하나에 연결 하나뿐이라 두 번째 클라이언트가 "Server already initialized"로 거절됐다.
+export const VERSION = '1.10.0';
+const TOOL_DEFS: any[][] = [];
+const server = { tool: (...a: any[]) => { TOOL_DEFS.push(a); } };
+export function buildServer(allow?: Set<string>) {
+  const s: any = new McpServer({ name: 'mybox-mcp', version: VERSION });
+  for (const a of TOOL_DEFS) if (!allow || allow.has(a[0])) s.tool(...a);
+  return s;
+}
 const BASE_URL = process.env.MYBOX_BASE_URL || 'https://open-api.mybox.naver.com/v1'; // 시험용으로만 바꾼다
 
 function getAuthHeaders() {
@@ -73,8 +106,7 @@ server.tool('dms_root', '루트 파일/폴더 목록 조회', paging, async (arg
 
 // 3
 server.tool('dms_list', '특정 폴더 내 파일/폴더 목록 조회', { resourceId: idParam('조회할 폴더의 ID'), ...paging },
-  async ({ resourceId, ...params }) =>
-    out(await makeRequest('GET', `/drive/folders/${resourceId}/resources`, undefined, params)));
+  async ({ resourceId, ...params }) => out(await core.list(resourceId, params)));
 
 // 4
 server.tool('dms_resourceId', '개별 파일/폴더 속성 조회', { resourceId: idParam('파일/폴더 ID') }, async (args) =>
@@ -84,7 +116,7 @@ server.tool('dms_resourceId', '개별 파일/폴더 속성 조회', { resourceId
 server.tool('files_create_folder', '폴더 생성', {
   folderName: z.string().describe('생성할 폴더 이름'),
   parentId: z.string().optional().describe('상위 폴더 ID(생략 시 루트)')
-}, async (args) => out(await makeRequest('POST', '/drive/folders', args)));
+}, async (args) => out(await core.createFolder(args)));
 
 // 6 업로드 URL
 server.tool('files_upload', '파일 업로드 URL 생성 (PC 파일을 바로 올리려면 files_upload_from_path)', {
@@ -108,7 +140,7 @@ server.tool('files_copy', '파일/폴더 복사', {
   parentId: z.string().optional().describe('복사본을 둘 폴더 ID(생략 시 루트)'),
   name: z.string().optional(),
   isOverwrite: z.boolean().optional()
-}, async ({ resourceId, ...body }) => out(await makeRequest('POST', `/drive/resources/${resourceId}/copy`, body)));
+}, async ({ resourceId, ...body }) => out(await core.copy(resourceId, body)));
 
 // 9 삭제 (휴지통으로 이동)
 server.tool('files_delete', '파일/폴더 삭제 — 휴지통으로 이동(영구 삭제 아님). 한 번에 하나.', {
@@ -120,7 +152,7 @@ server.tool('files_move', '파일/폴더 이동', {
   resourceId: idParam('이동할 ID'),
   parentId: z.string().describe('이동할 위치의 폴더 ID'),
   isOverwrite: z.boolean().optional()
-}, async ({ resourceId, ...body }) => out(await makeRequest('POST', `/drive/resources/${resourceId}/move`, body)));
+}, async ({ resourceId, ...body }) => out(await core.move(resourceId, body)));
 
 // 11 이름 변경
 server.tool('files_rename', '파일/폴더 이름 변경 (확장자 포함해서 입력)', {
@@ -309,19 +341,44 @@ server.tool('job_put_chunk',
     verify_content: z.boolean().optional().describe('1.9.1: bundle 일감에서만. 올린 파일을 MYBOX에서 내려받아 내용 sha256까지 대조한다(느림·전송량 증가). 결과는 entries의 content_verified'),
     upload_concurrency: z.number().int().optional().describe('1.9.1: bundle 일감에서만. 마무리 때 동시에 올릴 파일 수 1~4(기본 1)')
   },
-  async (args) => out(await putChunk(args as any, jobUploader)));
+  async (args) => out(await core.putChunk(args)));
 server.tool('job_status', '일감의 진행·마무리 결과를 읽는다(읽기 전용)', { job_id: z.string() },
   { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
-  async (args) => out(jobStatus(args.job_id)));
+  async (args) => out(core.status(args.job_id)));
+
+// ---- 1.9.3 시험: 반영 핵심(core) — MCP 문(도구)과 일반 HTTPS 문(/api/v1)이 같은 함수를 부른다 --------
+const pick = (o: any, keys: string[]) => { const r: any = {}; for (const k of keys) if (o && o[k] !== undefined) r[k] = o[k]; return r; };
+export const core = {
+  list: async (resourceId: string, params: any = {}) => { if (GUARD) await folderAllowed(resourceId, '조회 폴더');
+    return makeRequest('GET', `/drive/folders/${resourceId}/resources`, undefined, pick(params, ['sort', 'count', 'cursor'])); },
+  createFolder: async (args: any) => { if (GUARD) await folderAllowed(args && args.parentId, '상위 폴더');
+    if (typeof args?.folderName !== 'string' || !args.folderName.trim() || args.folderName.length > 255) deny('folderName이 올바르지 않습니다');
+    return makeRequest('POST', '/drive/folders', pick(args, ['folderName', 'parentId'])); },
+  copy: async (resourceId: string, body: any = {}) => { if (GUARD) { await insideAllowed(resourceId, '복사 원본'); await folderAllowed(body.parentId, '복사 목적지'); }
+    return makeRequest('POST', `/drive/resources/${resourceId}/copy`, pick(body, ['parentId', 'name', 'isOverwrite'])); },
+  move: async (resourceId: string, body: any = {}) => { if (GUARD) { await insideAllowed(resourceId, '이동 원본'); await folderAllowed(body.parentId, '이동 목적지'); }
+    return makeRequest('POST', `/drive/resources/${resourceId}/move`, pick(body, ['parentId', 'isOverwrite'])); },
+  putChunk: (args: any) => putChunk(args, jobUploader),
+  status: (jobId: string) => jobStatus(jobId),
+};
 
 async function run() {
+  if (GUARD) {
+    if (!allowRoots().length) { console.error('지킴이: NL_JOB_ALLOWED_PARENTS가 비어 있어 시작하지 않습니다(바깥 공개 모드)'); process.exit(3); }
+    for (const x of allowRoots()) if (!RID_RE.test(x)) { console.error('지킴이: 허용 목록 ID 형식 오류: ' + x); process.exit(3); }
+    if (process.env.NL_TRANSPORT === 'http') {
+      const want = (process.env.NL_HTTP_TOOLS || 'job_put_chunk,job_status').split(',').map(x => x.trim()).filter(Boolean);
+      const bad = want.filter(x => !GUARDED_TOOLS.includes(x));
+      if (bad.length) { console.error('지킴이: 지킴이가 없는 도구는 HTTP로 열지 않습니다: ' + bad.join(',')); process.exit(3); }
+    }
+  }
   if (!(process.env.NL_JOB_ALLOWED_PARENTS || '').trim()) console.error('경고(1.9.1+): NL_JOB_ALLOWED_PARENTS가 비어 있어 job_put_chunk가 어느 MYBOX 폴더로든 올릴 수 있습니다. 시험 단계에서는 시험 미러 폴더 ID(또는 tree:<ID>)를 넣으세요.');
   if (process.env.NL_TRANSPORT === 'http') {   // 시험용. HTTP 코드는 mybox-mcp-http 번들에만 들어간다(esbuild --define:__HTTP__=true). 기본(PC 적용용) stdio 번들에는 없다
-    if (__HTTP__) { const { runHttp } = await import('./http.js'); await runHttp(server); return; }
+    if (__HTTP__) { const { runHttp } = await import('./http.js'); await runHttp(buildServer, core); return; }
     console.error('이 번들은 HTTP를 지원하지 않습니다(NL_TRANSPORT=http 는 mybox-mcp-http 번들에서만).'); process.exit(2);
   }
   const transport = new StdioServerTransport();
-  await server.connect(transport);
+  await buildServer().connect(transport);
   console.error('MYBOX MCP Server running on stdio');
 }
 

@@ -1,0 +1,90 @@
+  OK   [G0a] 허용 목록이 비면 시작하지 않음
+  OK   [G0b] 지킴이 없는 도구(files_delete)를 열려 하면 시작하지 않음
+  OK   [G0c] 휴지통 비우기를 열려 하면 시작하지 않음
+  OK   [G0d] 허용 목록 ID에 경로 문자가 있으면 시작하지 않음
+  OK   [G0e] HTTP로 보이는 도구는 6개뿐: dms_list,files_copy,files_create_folder,files_move,job_put_chunk,job_status
+  OK   [G1a] 허용 뿌리 목록 → 성공
+  OK   [G1b] 허용 하위 목록 → 성공
+  OK   [G1c] 밖 폴더 목록 → 거절, MYBOX 쓰기 0 [not_allowed: 조회 폴더 허용 범위 밖: OUT]
+  OK   [G1d] 드라이브 뿌리 목록 → 거절, MYBOX 쓰기 0 [not_allowed: 조회 폴더 허용 범위 밖: ROOT]
+  OK   [G1e] 상위를 읽다 400이 나는 폴더(뿌리 너머) 목록 → 거절, MYBOX 쓰기 0 [not_allowed: 조회 폴더 허용 범위 밖: PSEUDOK (API Error: 400 - {"error":"bad"})]
+  OK   [G2a] 허용 하위에 만들기 → 성공
+  OK   [G2b] 밖에 만들기 → 거절, MYBOX 쓰기 0 [not_allowed: 상위 폴더 허용 범위 밖: OUT]
+  OK   [G2c] 상위 폴더 생략(=드라이브 뿌리) → 거절, MYBOX 쓰기 0 [not_allowed: 상위 폴더 형식이 올바르지 않습니다]
+  OK   [G2d] 상위 ID에 ../ 조작 → 거절, MYBOX 쓰기 0 [not_allowed: 상위 폴더 형식이 올바르지 않습니다]
+  OK   [G3a] 허용 안 파일 → 허용 안 → 성공
+  OK   [G3b] 허용 안 파일 → 밖 (빼내기) → 거절, MYBOX 쓰기 0 [not_allowed: 복사 목적지 허용 범위 밖: OUT]
+  OK   [G3c] 밖 파일 → 허용 안 (끌어오기) → 거절, MYBOX 쓰기 0 [not_allowed: 복사 원본의 상위 폴더 허용 범위 밖: OUT]
+  OK   [G3d] 목적지 생략(=뿌리) → 거절, MYBOX 쓰기 0 [not_allowed: 복사 목적지 형식이 올바르지 않습니다]
+  OK   [G3e] 허용 뿌리 자체 복사 → 거절, MYBOX 쓰기 0 [not_allowed: 허용 폴더 자체는 옮기거나 복사할 수 없습니다: ALLOW]
+  OK   [G3f] 원본 ID 경로 조작 → 거절, MYBOX 쓰기 0 [not_allowed: 복사 원본 형식이 올바르지 않습니다]
+  OK   [G3g] 없는 원본 ID(404) → 거절, MYBOX 쓰기 0 [not_allowed: 복사 원본 위치를 읽지 못했습니다 (API Error: 404 - {"error":"nf"})]
+  OK   [G4a] 허용 안 파일 → 허용 하위 → 성공
+  OK   [G4a′] 가짜 MYBOX에서 F2가 SUB로 옮겨짐
+  OK   [G4b] 허용 안 파일 → 밖 → 거절, MYBOX 쓰기 0 [not_allowed: 이동 목적지 허용 범위 밖: OUT]
+  OK   [G4c] 밖 파일 → 허용 안 → 거절, MYBOX 쓰기 0 [not_allowed: 이동 원본의 상위 폴더 허용 범위 밖: OUT]
+  OK   [G4d] 허용 뿌리 자체를 밖으로 → 거절, MYBOX 쓰기 0 [not_allowed: 허용 폴더 자체는 옮기거나 복사할 수 없습니다: ALLOW]
+  OK   [G4e] 허용 하위 폴더를 통째로 밖으로 → 거절, MYBOX 쓰기 0 [not_allowed: 이동 목적지 허용 범위 밖: OUTSUB]
+  OK   [G4f] 목적지 ID 인코딩 조작 → 거절, MYBOX 쓰기 0 [not_allowed: 이동 목적지 형식이 올바르지 않습니다]
+  OK   [G4g] 원본 ID 뒤 공백 → 거절, MYBOX 쓰기 0 [not_allowed: 이동 원본 형식이 올바르지 않습니다]
+  OK   [G4h] 300자 넘는 ID → 거절, MYBOX 쓰기 0 [not_allowed: 이동 목적지 형식이 올바르지 않습니다]
+  OK   [G4i] 거절된 뒤 가짜 MYBOX 나무가 그대로
+  OK   [G5] files_delete 호출 → 거절, MYBOX 쓰기 0 [MCP error -32602: Tool files_delete not found]
+  OK   [G5] files_rename 호출 → 거절, MYBOX 쓰기 0 [MCP error -32602: Tool files_rename not found]
+  OK   [G5] files_trash_clean 호출 → 거절, MYBOX 쓰기 0 [MCP error -32602: Tool files_trash_clean not found]
+  OK   [G5] dms_root 호출 → 거절, MYBOX 쓰기 0 [MCP error -32602: Tool dms_root not found]
+  OK   [G5] search_files_resources 호출 → 거절, MYBOX 쓰기 0 [MCP error -32602: Tool search_files_resources not found]
+  OK   [G5] files_upload_from_path 호출 → 거절, MYBOX 쓰기 0 [MCP error -32602: Tool files_upload_from_path not found]
+  OK   [G5] files_download_to_path 호출 → 거절, MYBOX 쓰기 0 [MCP error -32602: Tool files_download_to_path not found]
+  OK   [G6a] 밖 폴더로 일감 → 거절, MYBOX 쓰기 0 [not_allowed: 허용되지 않은 폴더입니다: OUT]
+  OK   [G6b] 일감 ID 경로 조작 → 거절, MYBOX 쓰기 0 [job_id는 영문·숫자·_·- 1~64자여야 합니다]
+  OK   [G6c] job_status ID 경로 조작 거절
+  OK   [G7] 수정판 stdio: 밖 폴더 복사·목록이 지금처럼 됨(PC Claude 세션 읽기용 동작 보존)
+  OK   [G7] 원본 stdio: 밖 폴더 복사·목록이 지금처럼 됨(PC Claude 세션 읽기용 동작 보존)
+  OK   [G7c] stdio라도 NL_TOOL_GUARD=1이면 지킴이 켜짐 → 거절, MYBOX 쓰기 0 [not_allowed: 복사 원본의 상위 폴더 허용 범위 밖: OUT]
+통과 44 / 실패 0
+MYBOX 호출 44건
+GET /v1/drive/folders/ALLOW/resources
+GET /v1/drive/resources/SUB
+GET /v1/drive/folders/SUB/resources
+GET /v1/drive/resources/OUT
+GET /v1/drive/resources/ROOT
+GET /v1/drive/resources/ROOT
+GET /v1/drive/resources/PSEUDOK
+GET /v1/drive/resources/PSEUDO
+POST /v1/drive/folders
+GET /v1/drive/resources/OUT
+GET /v1/drive/resources/ROOT
+GET /v1/drive/resources/F1
+POST /v1/drive/resources/F1/copy
+GET /v1/drive/resources/F1
+GET /v1/drive/resources/OUT
+GET /v1/drive/resources/ROOT
+GET /v1/drive/resources/OUTF
+GET /v1/drive/resources/OUT
+GET /v1/drive/resources/ROOT
+GET /v1/drive/resources/F1
+GET /v1/drive/resources/NOPE
+GET /v1/drive/resources/F2
+POST /v1/drive/resources/F2/move
+GET /v1/drive/resources/F1
+GET /v1/drive/resources/OUT
+GET /v1/drive/resources/ROOT
+GET /v1/drive/resources/OUTF
+GET /v1/drive/resources/OUT
+GET /v1/drive/resources/ROOT
+GET /v1/drive/resources/SUB
+GET /v1/drive/resources/OUTSUB
+GET /v1/drive/resources/OUT
+GET /v1/drive/resources/ROOT
+GET /v1/drive/resources/F1
+GET /v1/drive/resources/F1
+GET /v1/drive/resources/OUT
+GET /v1/drive/resources/ROOT
+POST /v1/drive/resources/OUTF/copy
+GET /v1/drive/folders/OUT/resources
+POST /v1/drive/resources/OUTF/copy
+GET /v1/drive/folders/OUT/resources
+GET /v1/drive/resources/OUTF
+GET /v1/drive/resources/OUT
+GET /v1/drive/resources/ROOT
