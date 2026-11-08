@@ -97,7 +97,6 @@ export function checkDiskFree(need: number) {
   if (free < need + margin) throw new Error('disk_full: PC 작업 폴더의 남은 공간이 모자랍니다(필요 약 ' + Math.ceil((need + margin) / 1048576) + ' MiB, 남음 ' + Math.floor(free / 1048576) + ' MiB). 공간을 비운 뒤 새 job_id로 다시 보내세요');
 }
 /** 쓸 수 있는 MYBOX 폴더 허용 목록(1.9.1). 환경변수 NL_JOB_ALLOWED_PARENTS = 쉼표로 구분한 폴더 ID, 또는 'tree:<ID>'(그 폴더와 모든 하위 폴더). 비어 있으면 제한 없음(이전과 같음) */
-const ALLOW_CACHE = new Map<string, boolean>();
 export async function checkAllowed(parentId: string | undefined, uploader: Uploader, cache = new Map<string, boolean>()) {
   const raw = (process.env.NL_JOB_ALLOWED_PARENTS || '').split(',').map(x => x.trim()).filter(Boolean);
   if (!raw.length) return;
@@ -269,7 +268,7 @@ export async function putChunk(a: ChunkArgs, uploader: Uploader) {
   const waitMs = a.wait_ms == null ? 0 : a.wait_ms;
   if (!Number.isInteger(waitMs) || waitMs < 0 || waitMs > WAIT_MAX_MS) throw new Error('wait_ms는 0~' + WAIT_MAX_MS + ' 정수여야 합니다');
 
-  if (!a.dry_run) await checkAllowed(a.parent_id, uploader, ALLOW_CACHE);   // 일감 기록을 만들기 전에(이 await 뒤부터는 다시 전부 동기 구간)
+  if (!a.dry_run) await checkAllowed(a.parent_id, uploader);   // 일감 기록을 만들기 전에(이 await 뒤부터는 다시 전부 동기 구간)
   const opts: JobOpts = { parentId: a.parent_id, subfolder: a.subfolder || undefined, isOverwrite: a.is_overwrite, dryRun: a.dry_run, cleanup: a.cleanup, bundle: a.bundle || undefined, verifyContent: a.verify_content || undefined, uploadConcurrency: a.upload_concurrency || undefined };
   let st = load(a.job_id);
   if (!st) {
@@ -322,11 +321,13 @@ export async function finalize(st: JobState, uploader: Uploader) {
   try {
     if (!o.dryRun) {
       let target = o.parentId;
+      await checkAllowed(o.parentId, uploader);   // 올리기 직전 재판정(접수 때 통과한 폴더가 그 뒤 허용 밖으로 옮겨졌을 수 있음)
       if (o.subfolder) {   // 새 폴더를 만들고 거기에만 올린다 → 옛 파일과 섞이지 않는다. 같은 이름 폴더가 있으면 실패(새 이름으로 새 일감)
         target = await uploader.createFolder(o.subfolder, o.parentId as string);
         st.folder_id = target; save(st);
       }
       for (const f of st.spec.files) {
+        await checkAllowed(target, uploader);   // 파일마다 올리기 직전에 다시 판정
         await uploader.upload(path.join(dir, f.name), target, !!o.isOverwrite);
         st.files[f.name].uploaded = true; save(st);
       }
@@ -424,7 +425,7 @@ export async function finalizeBundle(st: JobState, uploader: Uploader) {
 async function uploadEntries(st: JobState, uploader: Uploader, edir: string) {
   const o = st.spec.opts, ents = st.entries as EntryState[];
   let base = o.parentId;
-  if (o.subfolder) { base = await uploader.createFolder(o.subfolder, o.parentId as string); st.folder_id = base; save(st); }
+  if (o.subfolder) { await checkAllowed(o.parentId, uploader); base = await uploader.createFolder(o.subfolder, o.parentId as string); st.folder_id = base; save(st); }
   const allowCache = new Map<string, boolean>();
   const lists = new Map<string, Map<string, { name?: string; size?: number; rid?: string }>>();
   const listOf = async (t: string | undefined, fresh = false) => {   // 원격 목록의 이름도 같은 정규화 키로 다시 담는다(실제 이름은 name에 보관)
@@ -441,6 +442,7 @@ async function uploadEntries(st: JobState, uploader: Uploader, edir: string) {
       const ex = ls.get(normName(e.name));
       if (ex && !o.isOverwrite) { e.error = 'exists: 같은 이름이 이미 있어 올리지 않았습니다(MYBOX 이름 ' + ex.name + ', 크기 ' + ex.size + ')'; save(st); return; }
       if (ex && ex.name !== e.name) { e.error = 'case_conflict: 이름이 대소문자·글자 구성만 다른 기존 파일(' + ex.name + ')이 있어 덮어쓰기 대상이 모호해 올리지 않았습니다'; save(st); return; }
+      await checkAllowed(e.target, uploader);   // 실제 올리기 직전에 다시 판정(검사 뒤 폴더가 옮겨진 경우를 막음)
       await uploader.upload(path.join(edir, String(e.id), e.name), e.target, !!o.isOverwrite); e.uploaded = true; save(st);
     } catch (err: any) { e.error = String(err && err.message || err).slice(0, 300); save(st); }
   };

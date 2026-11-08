@@ -58952,7 +58952,6 @@ function checkDiskFree(need) {
   const margin = (Number(process.env.NL_MIN_FREE_MB) || 64) * 1024 * 1024;
   if (free < need + margin) throw new Error("disk_full: PC \uC791\uC5C5 \uD3F4\uB354\uC758 \uB0A8\uC740 \uACF5\uAC04\uC774 \uBAA8\uC790\uB78D\uB2C8\uB2E4(\uD544\uC694 \uC57D " + Math.ceil((need + margin) / 1048576) + " MiB, \uB0A8\uC74C " + Math.floor(free / 1048576) + " MiB). \uACF5\uAC04\uC744 \uBE44\uC6B4 \uB4A4 \uC0C8 job_id\uB85C \uB2E4\uC2DC \uBCF4\uB0B4\uC138\uC694");
 }
-var ALLOW_CACHE = /* @__PURE__ */ new Map();
 async function checkAllowed(parentId, uploader, cache2 = /* @__PURE__ */ new Map()) {
   const raw = (process.env.NL_JOB_ALLOWED_PARENTS || "").split(",").map((x) => x.trim()).filter(Boolean);
   if (!raw.length) return;
@@ -59127,7 +59126,7 @@ async function putChunk(a, uploader) {
   if ((a.verify_content || a.upload_concurrency) && !a.bundle) throw new Error("verify_content\xB7upload_concurrency\uB294 bundle \uC77C\uAC10\uC5D0\uC11C\uB9CC \uC501\uB2C8\uB2E4");
   const waitMs = a.wait_ms == null ? 0 : a.wait_ms;
   if (!Number.isInteger(waitMs) || waitMs < 0 || waitMs > WAIT_MAX_MS) throw new Error("wait_ms\uB294 0~" + WAIT_MAX_MS + " \uC815\uC218\uC5EC\uC57C \uD569\uB2C8\uB2E4");
-  if (!a.dry_run) await checkAllowed(a.parent_id, uploader, ALLOW_CACHE);
+  if (!a.dry_run) await checkAllowed(a.parent_id, uploader);
   const opts = { parentId: a.parent_id, subfolder: a.subfolder || void 0, isOverwrite: a.is_overwrite, dryRun: a.dry_run, cleanup: a.cleanup, bundle: a.bundle || void 0, verifyContent: a.verify_content || void 0, uploadConcurrency: a.upload_concurrency || void 0 };
   let st = load(a.job_id);
   if (!st) {
@@ -59200,12 +59199,14 @@ async function finalize2(st, uploader) {
   try {
     if (!o.dryRun) {
       let target = o.parentId;
+      await checkAllowed(o.parentId, uploader);
       if (o.subfolder) {
         target = await uploader.createFolder(o.subfolder, o.parentId);
         st.folder_id = target;
         save(st);
       }
       for (const f of st.spec.files) {
+        await checkAllowed(target, uploader);
         await uploader.upload(path.join(dir, f.name), target, !!o.isOverwrite);
         st.files[f.name].uploaded = true;
         save(st);
@@ -59343,6 +59344,7 @@ async function uploadEntries(st, uploader, edir) {
   const o = st.spec.opts, ents = st.entries;
   let base = o.parentId;
   if (o.subfolder) {
+    await checkAllowed(o.parentId, uploader);
     base = await uploader.createFolder(o.subfolder, o.parentId);
     st.folder_id = base;
     save(st);
@@ -59387,6 +59389,7 @@ async function uploadEntries(st, uploader, edir) {
         save(st);
         return;
       }
+      await checkAllowed(e.target, uploader);
       await uploader.upload(path.join(edir, String(e.id), e.name), e.target, !!o.isOverwrite);
       e.uploaded = true;
       save(st);
@@ -59444,17 +59447,13 @@ function rid(v, what) {
 function allowRoots() {
   return (process.env.NL_JOB_ALLOWED_PARENTS || "").split(",").map((x) => x.trim()).filter(Boolean).map((x) => x.startsWith("tree:") ? x.slice(5) : x);
 }
-var OK_UNTIL = /* @__PURE__ */ new Map();
 async function folderAllowed(id, what) {
   const f = rid(id, what);
-  const t = OK_UNTIL.get(f);
-  if (t && t > Date.now()) return;
   try {
     await checkAllowed(f, jobUploader, /* @__PURE__ */ new Map());
   } catch (e) {
     deny(what + " \uD5C8\uC6A9 \uBC94\uC704 \uBC16: " + f + (String(e.message).startsWith("not_allowed") ? "" : " (" + String(e.message).slice(0, 80) + ")"));
   }
-  OK_UNTIL.set(f, Date.now() + 6e4);
 }
 async function insideAllowed(id, what) {
   const r = rid(id, what);

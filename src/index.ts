@@ -21,11 +21,9 @@ const RID_RE = /^[A-Za-z0-9+=_-]{1,300}$/;
 const deny = (m: string) => { throw new Error('not_allowed: ' + m); };
 function rid(v: unknown, what: string): string { if (typeof v !== 'string' || !RID_RE.test(v)) deny(what + ' 형식이 올바르지 않습니다'); return v as string; }
 function allowRoots(): string[] { return (process.env.NL_JOB_ALLOWED_PARENTS || '').split(',').map(x => x.trim()).filter(Boolean).map(x => x.startsWith('tree:') ? x.slice(5) : x); }
-const OK_UNTIL = new Map<string, number>();   // 통과한 폴더만 60초 기억(거절은 기억하지 않음)
 async function folderAllowed(id: unknown, what: string) {
-  const f = rid(id, what); const t = OK_UNTIL.get(f); if (t && t > Date.now()) return;
+  const f = rid(id, what);   // 호출마다 새로 판정(캐시 없음: 폴더 이동·권한 변경을 바로 반영)
   try { await checkAllowed(f, jobUploader, new Map()); } catch (e: any) { deny(what + ' 허용 범위 밖: ' + f + (String(e.message).startsWith('not_allowed') ? '' : ' (' + String(e.message).slice(0, 80) + ')')); }
-  OK_UNTIL.set(f, Date.now() + 60000);
 }
 async function insideAllowed(id: unknown, what: string) {
   const r = rid(id, what);
