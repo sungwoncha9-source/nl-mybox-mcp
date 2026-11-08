@@ -21,8 +21,12 @@ const safeEq = (a: string, b: string) => { const x = Buffer.from(a), y = Buffer.
 // b1/claimlog (시험 전용, 기본 꺼짐): NL_CLAIMLOG=1 이고 NL_CLAIMLOG_KEY(16자 이상)가 있을 때만 검증한 클레임의 최소 진단을 stderr 한 줄로 남긴다.
 // 남기는 것: 서버 키 HMAC 앞 12자(sub·azp·client_id 가명, 같은 값이면 같은 가명), aud 일치 여부·개수, scope 보유 여부, gty, MCP 메서드/도구 이름.
 // 남기지 않는 것: 출입증 전문, 헤더, 원래 sub·azp·client_id 값, 요청 본문.
-const CLAIMLOG = process.env.NL_CLAIMLOG === '1' && (process.env.NL_CLAIMLOG_KEY || '').length >= 16;
-const hmac12 = (v: string) => crypto.createHmac('sha256', process.env.NL_CLAIMLOG_KEY || 'x').update(v).digest('hex').slice(0, 12);
+// w1/deploy-b1: 키를 안 주면 프로세스마다 무작위 키를 만든다(가명이 프로세스 안에서만 같음 → 재시작하면 바뀜, 같은 호출자 비교에는 충분).
+// w1/deploy-b1: JSON 응답 모드는 NL_JSON_RESPONSE=1일 때만(기본 꺼짐 = 1.10.0과 같은 SSE). 실제 Claude 커넥터에서 확인되기 전까지 기본을 바꾸지 않는다.
+const JSONMODE = process.env.NL_JSON_RESPONSE === '1';
+const CLAIMLOG = process.env.NL_CLAIMLOG === '1';
+const CLAIMKEY = (process.env.NL_CLAIMLOG_KEY || '').length >= 16 ? String(process.env.NL_CLAIMLOG_KEY) : crypto.randomBytes(24).toString('hex');
+const hmac12 = (v: string) => crypto.createHmac('sha256', CLAIMKEY).update(v).digest('hex').slice(0, 12);
 const claimLog = (who: any, req: http.IncomingMessage, path: string, body: any) => {
   if (!CLAIMLOG || !who || !who.diag) return;
   const sid = String(req.headers['mcp-session-id'] || '');
@@ -131,7 +135,7 @@ export async function runHttp(buildServer: (allow: Set<string>) => any, core?: a
       claimLog(who, req, path, body);
       if (path.startsWith('/api/v1/')) return await restRoute(req, res, body, core, allowTools);
       // 응답은 JSON 한 번에(SSE 스트림 없음). 서버가 먼저 보내는 알림이 없으므로 GET 스트림은 열지 않는다(스펙상 405 허용).
-      if (req.method === 'GET') { res.setHeader('allow', 'POST, DELETE, OPTIONS'); return deny(405, 'method not allowed'); }
+      if (JSONMODE && req.method === 'GET') { res.setHeader('allow', 'POST, DELETE, OPTIONS'); return deny(405, 'method not allowed'); }
       const sid = String(req.headers['mcp-session-id'] || '');
       if (sid) {
         const e = sessions.get(sid);
@@ -145,7 +149,7 @@ export async function runHttp(buildServer: (allow: Set<string>) => any, core?: a
       if (req.method !== 'POST' || !isInitializeRequest(body)) return deny(400, 'mcp-session-id required');
       if (sessions.size >= MAX) return deny(503, 'too many sessions');
       const s = buildServer(allowTools);
-      const t: any = new StreamableHTTPServerTransport({ sessionIdGenerator: () => crypto.randomUUID(), enableJsonResponse: true,
+      const t: any = new StreamableHTTPServerTransport({ sessionIdGenerator: () => crypto.randomUUID(), enableJsonResponse: JSONMODE,
         onsessioninitialized: (id: string) => { sessions.set(id, { t, s, sub: who.sub, last: Date.now() }); } });
       t.onclose = () => { if (t.sessionId) sessions.delete(t.sessionId); };
       await s.connect(t);
@@ -154,7 +158,11 @@ export async function runHttp(buildServer: (allow: Set<string>) => any, core?: a
   });
   srv.on('close', () => { clearInterval(sweep); for (const id of [...sessions.keys()]) closeSession(id); });
   await new Promise<void>(r => srv.listen(port, host, r));
-  if (CLAIMLOG) console.error('CLAIMLOG 켜짐 (시험 전용, 가명만 기록)'); else if (process.env.NL_CLAIMLOG === '1') console.error('CLAIMLOG 요청됐으나 NL_CLAIMLOG_KEY(16자 이상)가 없어 꺼짐');
+  if (CLAIMLOG) console.error('CLAIMLOG 켜짐 (시험 전용, 가명만 기록' + ((process.env.NL_CLAIMLOG_KEY || '').length >= 16 ? '' : ', 무작위 키') + ')');
+  if (JSONMODE) console.error('JSON 응답 모드 켜짐 (NL_JSON_RESPONSE=1)');
+  if (process.env.NL_B2_PROBE === '1') {   // w1/deploy-b1: 시작 때 한 번 MYBOX 읽기 시험(GET만). 결과 줄만 로그에 남고 토큰은 출력되지 않는다.
+    import('node:child_process').then(({ spawn }) => { const c = spawn(process.execPath, [new URL('./tools/b2_read_probe.mjs', import.meta.url).pathname], { stdio: ['ignore', 'inherit', 'inherit'], env: process.env }); c.on('error', (e: any) => console.error('B2 시험 시작 실패: ' + String(e && e.message || e).slice(0, 120))); c.on('exit', (code: any) => console.error('B2 시험 종료 코드 ' + code)); });
+  }
   const a: any = srv.address(); console.error('MYBOX MCP HTTP listening on http://' + host + ':' + a.port + '/mcp (인증: ' + auth.mode + ', 도구: ' + [...allowTools].join(',') + ')');
   return srv;
 }

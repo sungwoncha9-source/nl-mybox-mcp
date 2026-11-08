@@ -20,8 +20,8 @@ const lines = (s) => s.err.split('\n').filter(l => l.startsWith('CLAIMLOG {')).m
 
 console.log('[C1] 기본(꺼짐)'); { const s = await start({}); const t = await sign({ azp: AZP }); const r = await post(s.port, init, t); await wait(200);
   ok(r.status === 200, '[C1a] 정상 호출 200'); ok(lines(s).length === 0 && !/CLAIMLOG/.test(s.err), '[C1b] 꺼져 있으면 CLAIMLOG 줄 0'); s.p.kill(); }
-console.log('[C2] 켬이지만 키 없음/짧음'); { const s = await start({ NL_CLAIMLOG: '1', NL_CLAIMLOG_KEY: 'short' }); const t = await sign({ azp: AZP }); await post(s.port, init, t); await wait(200);
-  ok(lines(s).length === 0 && /키.*없어 꺼짐|NL_CLAIMLOG_KEY/.test(s.err), '[C2] 키가 짧으면 꺼짐 + 안내 한 줄'); s.p.kill(); }
+console.log('[C2] 켬 + 키 짧음 → 무작위 키로 켜짐(w1/deploy-b1)'); { const s = await start({ NL_CLAIMLOG: '1', NL_CLAIMLOG_KEY: 'short' }); const t = await sign({ azp: AZP }); await post(s.port, init, t); await wait(200);
+  ok(lines(s).length >= 1 && /무작위 키/.test(s.err), '[C2a] 키가 짧으면 무작위 키로 켜짐 + 안내'); ok(!s.err.includes('short'), '[C2b] 짧은 키 값 로그에 없음'); s.p.kill(); }
 console.log('[C3] 켬'); { const KEY = 'k'.repeat(24); const s = await start({ NL_CLAIMLOG: '1', NL_CLAIMLOG_KEY: KEY });
   const tA = await sign({ azp: AZP }); const tB = await sign({ client_id: CID, gty: 'authorization_code' }); const tC = await sign({});
   const rA = await post(s.port, init, tA); const sid = rA.h['mcp-session-id'];

@@ -1,0 +1,55 @@
+  OK   [R1a] 토큰 없으면 401
+  OK   [R1b] 틀린 토큰 401
+  OK   [R1c] 허용 안 된 출처 403
+  OK   [R1d] 허용한 출처는 200 + CORS 허용(독립 웹앱 브라우저에서 직접 호출 가능)
+  OK   [R1e] 없는 경로 404
+  OK   [R2a] 허용 하위 목록 200
+  OK   [R2b] 밖 목록 403
+  OK   [R2c] 허용 하위에 폴더 만들기 200
+  OK   [R2d] 밖에 폴더 만들기 403, MYBOX 쓰기 0
+  OK   [R2e] 상위 생략 403
+  OK   [R2f] 허용 안 복사 200
+  OK   [R2g] 밖으로 복사 403
+  OK   [R2h] 밖 파일 끌어오기 403
+  OK   [R2i] 허용 뿌리 옮기기 403
+  OK   [R2j] URL 인코딩 경로 조작 403
+  OK   [R2k] 본문에 끼운 다른 resourceId는 무시(경로의 ID만 씀)
+  OK   [R2l] 깨진 JSON 400
+  OK   [R3a] REST 일감 한 번에 done·final (22ms, 가짜 MYBOX)
+  OK   [R3b] 가짜 MYBOX에 같은 크기로 도착
+  OK   [R3c] 같은 일감 다시 보내도 중복 올리기 0
+  OK   [R3d] 일감 상태 읽기
+  OK   [R3e] 밖 폴더 일감 403
+  OK   [R3f] 일감 ID 조작 400
+  OK   [R4a] 같은 목록을 MCP와 REST로 읽으면 같은 JSON
+  OK   [R4b] 일감 상태도 두 문에서 같음
+  OK   [R5a] 복사를 열지 않으면 REST 복사 403
+  OK   [R5b] 목록을 열지 않으면 REST 목록 403
+통과 27 / 실패 0
+MYBOX 호출 26건
+GET /v1/drive/folders/ALLOW/resources
+GET /v1/drive/resources/SUB
+GET /v1/drive/folders/SUB/resources
+GET /v1/drive/resources/OUT
+GET /v1/drive/resources/ROOT
+POST /v1/drive/folders
+GET /v1/drive/resources/OUT
+GET /v1/drive/resources/ROOT
+GET /v1/drive/resources/F1
+POST /v1/drive/resources/F1/copy
+GET /v1/drive/resources/F1
+GET /v1/drive/resources/OUT
+GET /v1/drive/resources/ROOT
+GET /v1/drive/resources/OUTF
+GET /v1/drive/resources/OUT
+GET /v1/drive/resources/ROOT
+GET /v1/drive/resources/F1
+POST /v1/drive/resources/F1/move
+GET /v1/drive/resources/SUB
+POST /v1/drive/files
+POST /upload/UP671344
+GET /v1/drive/folders/SUB/resources
+GET /v1/drive/resources/OUT
+GET /v1/drive/resources/ROOT
+GET /v1/drive/folders/SUB/resources
+GET /v1/drive/folders/SUB/resources

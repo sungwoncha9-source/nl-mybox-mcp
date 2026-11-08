@@ -44421,7 +44421,7 @@ async function runHttp(buildServer2, core2) {
       }
       claimLog(who, req, path3, body);
       if (path3.startsWith("/api/v1/")) return await restRoute(req, res, body, core2, allowTools);
-      if (req.method === "GET") {
+      if (JSONMODE && req.method === "GET") {
         res.setHeader("allow", "POST, DELETE, OPTIONS");
         return deny2(405, "method not allowed");
       }
@@ -44440,7 +44440,7 @@ async function runHttp(buildServer2, core2) {
       const s = buildServer2(allowTools);
       const t = new StreamableHTTPServerTransport({
         sessionIdGenerator: () => crypto4.randomUUID(),
-        enableJsonResponse: true,
+        enableJsonResponse: JSONMODE,
         onsessioninitialized: (id) => {
           sessions.set(id, { t, s, sub: who.sub, last: Date.now() });
         }
@@ -44460,13 +44460,20 @@ async function runHttp(buildServer2, core2) {
     for (const id of [...sessions.keys()]) closeSession(id);
   });
   await new Promise((r) => srv.listen(port, host, r));
-  if (CLAIMLOG) console.error("CLAIMLOG \uCF1C\uC9D0 (\uC2DC\uD5D8 \uC804\uC6A9, \uAC00\uBA85\uB9CC \uAE30\uB85D)");
-  else if (process.env.NL_CLAIMLOG === "1") console.error("CLAIMLOG \uC694\uCCAD\uB410\uC73C\uB098 NL_CLAIMLOG_KEY(16\uC790 \uC774\uC0C1)\uAC00 \uC5C6\uC5B4 \uAEBC\uC9D0");
+  if (CLAIMLOG) console.error("CLAIMLOG \uCF1C\uC9D0 (\uC2DC\uD5D8 \uC804\uC6A9, \uAC00\uBA85\uB9CC \uAE30\uB85D" + ((process.env.NL_CLAIMLOG_KEY || "").length >= 16 ? "" : ", \uBB34\uC791\uC704 \uD0A4") + ")");
+  if (JSONMODE) console.error("JSON \uC751\uB2F5 \uBAA8\uB4DC \uCF1C\uC9D0 (NL_JSON_RESPONSE=1)");
+  if (process.env.NL_B2_PROBE === "1") {
+    import("node:child_process").then(({ spawn }) => {
+      const c = spawn(process.execPath, [new URL("./tools/b2_read_probe.mjs", import.meta.url).pathname], { stdio: ["ignore", "inherit", "inherit"], env: process.env });
+      c.on("error", (e) => console.error("B2 \uC2DC\uD5D8 \uC2DC\uC791 \uC2E4\uD328: " + String(e && e.message || e).slice(0, 120)));
+      c.on("exit", (code) => console.error("B2 \uC2DC\uD5D8 \uC885\uB8CC \uCF54\uB4DC " + code));
+    });
+  }
   const a = srv.address();
   console.error("MYBOX MCP HTTP listening on http://" + host + ":" + a.port + "/mcp (\uC778\uC99D: " + auth.mode + ", \uB3C4\uAD6C: " + [...allowTools].join(",") + ")");
   return srv;
 }
-var safeEq, CLAIMLOG, hmac12, claimLog, LOOP, isLoopUrl, list;
+var safeEq, JSONMODE, CLAIMLOG, CLAIMKEY, hmac12, claimLog, LOOP, isLoopUrl, list;
 var init_http = __esm({
   "src/http.ts"() {
     init_streamableHttp();
@@ -44476,8 +44483,10 @@ var init_http = __esm({
       const x = Buffer.from(a), y = Buffer.from(b);
       return x.length === y.length && crypto4.timingSafeEqual(x, y);
     };
-    CLAIMLOG = process.env.NL_CLAIMLOG === "1" && (process.env.NL_CLAIMLOG_KEY || "").length >= 16;
-    hmac12 = (v) => crypto4.createHmac("sha256", process.env.NL_CLAIMLOG_KEY || "x").update(v).digest("hex").slice(0, 12);
+    JSONMODE = process.env.NL_JSON_RESPONSE === "1";
+    CLAIMLOG = process.env.NL_CLAIMLOG === "1";
+    CLAIMKEY = (process.env.NL_CLAIMLOG_KEY || "").length >= 16 ? String(process.env.NL_CLAIMLOG_KEY) : crypto4.randomBytes(24).toString("hex");
+    hmac12 = (v) => crypto4.createHmac("sha256", CLAIMKEY).update(v).digest("hex").slice(0, 12);
     claimLog = (who, req, path3, body) => {
       if (!CLAIMLOG || !who || !who.diag) return;
       const sid = String(req.headers["mcp-session-id"] || "");

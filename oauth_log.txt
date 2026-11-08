@@ -1,0 +1,37 @@
+  OK   [O1] 허용 사용자 목록이 비면 시작하지 않음 (exit 1)
+  OK   [O1] 발급자 주소가 없으면 시작하지 않음 (exit 1)
+  OK   [O1] 공개 주소가 https가 아니면 시작하지 않음 (exit 1)
+  OK   [O1] 지킴이 없는 도구(files_delete)를 열려 하면 시작하지 않음 (exit 3)
+  OK   [O0] 정상 설정으로 시작
+  OK   [O2a] 메타데이터가 인증 없이 읽히고 resource·발급자가 맞음
+  OK   [O2b] 출입증 없으면 401 + 안내 주소 (Bearer resource_metadata="http://127.0.0.1/.well-known/oauth-protected-resource/mcp")
+  OK   [O3] 엉터리 출입증 → 401 (invalid_token)
+  OK   [O3] 만료된 출입증 → 401 (invalid_token)
+  OK   [O3] 대상(aud)이 다른 출입증 → 401 (invalid_token)
+  OK   [O3] 발급자가 다른 출입증 → 401 (invalid_token)
+  OK   [O3] 다른 열쇠로 서명 → 401 (invalid_token)
+  OK   [O3] alg:none 위조 → 401 (invalid_token)
+  OK   [O3] 고정 토큰을 출입증 자리에 → 401 (invalid_token)
+  OK   [O3] 허용 안 된 사용자 → 403 (forbidden_user)
+  OK   [O3z] 거부된 요청 동안 MYBOX 호출 0건
+  OK   [O4a] 정상 출입증으로 연결, 도구 6개만 보임 (6개; PC 경로 도구 없음)
+  OK   [O4b] 허용 폴더 목록 호출 성공
+  OK   [O4c] 세 클라이언트(두 사용자) 동시 연결, 세션 번호 서로 다름, 모두 호출 성공
+  OK   [O4d] 다른 사용자가 남의 세션 번호를 쓰면 403
+  OK   [O4e] 없는 세션 번호는 404(클라이언트가 새로 연결)
+  OK   [O4f] 세션 번호 없이 초기화 아닌 요청은 400
+  OK   [O4g] 출입증이 맞아도 지킴이는 그대로(허용 밖 폴더 거부)
+  OK   [O5a] REST 문도 같은 검사 (없음 401 / 정상 200 / 다른 사용자 403)
+  OK   [O5b] 공개 이름이 아닌 Host는 403
+  OK   [O5c] 세션 상한 2에서 세 번째 연결은 503 (200,200,503)
+  OK   [O5d] 쉰 세션은 자동 정리(404) → 자리가 비어 새 연결 200
+  OK   [O6] 서명 열쇠는 인증 서버 JWKS에서 받음 (2회)
+통과 28 / 실패 0
+MYBOX 호출 7건
+GET /v1/drive/resources/SUB
+GET /v1/drive/folders/SUB/resources
+GET /v1/drive/folders/SUB/resources
+GET /v1/drive/folders/SUB/resources
+GET /v1/drive/resources/OUT
+GET /v1/drive/resources/ROOT
+GET /v1/drive/folders/SUB/resources
