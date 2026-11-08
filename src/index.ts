@@ -16,7 +16,7 @@ import { putChunk, jobStatus, checkAllowed, type Uploader } from './jobs.js';
 // 켜지면: ① 허용 목록(NL_JOB_ALLOWED_PARENTS)이 비면 시작하지 않는다 ② ID 모양을 먼저 본다(경로 조작 차단)
 // ③ 목록·폴더 만들기·복사·이동은 출발지와 목적지가 모두 허용 범위 안이어야 한다 ④ 허용 폴더 자체는 옮기거나 복사하지 않는다
 const GUARD = process.env.NL_TRANSPORT === 'http' || process.env.NL_TOOL_GUARD === '1';
-export const GUARDED_TOOLS = ['job_put_chunk', 'job_status', 'dms_list', 'files_copy', 'files_move', 'files_create_folder'];
+export const GUARDED_TOOLS = ['job_put_chunk', 'job_status', 'dms_list', 'files_copy', 'files_move', 'files_create_folder', 'files_download'];   // 1.10.1: files_download 추가(대상 파일의 상위 폴더가 허용 범위 안이어야 함). 검색 도구는 결과 모양 미확인(B)이라 계속 HTTP로 열지 않는다
 const RID_RE = /^[A-Za-z0-9+=_-]{1,300}$/;
 const deny = (m: string) => { throw new Error('not_allowed: ' + m); };
 function rid(v: unknown, what: string): string { if (typeof v !== 'string' || !RID_RE.test(v)) deny(what + ' 형식이 올바르지 않습니다'); return v as string; }
@@ -38,7 +38,7 @@ async function insideAllowed(id: unknown, what: string) {
 declare const __HTTP__: boolean;   // 빌드 때 정해진다: stdio 번들 false(HTTP 코드 제거) / http 번들 true
 // 1.10.0 시험: 도구 정의를 한 번만 적어 두고, 연결(세션)마다 새 서버를 만들어 같은 도구를 붙인다.
 // 이유(A, 11-07 격리 시험): 서버 하나에 연결 하나뿐이라 두 번째 클라이언트가 "Server already initialized"로 거절됐다.
-export const VERSION = '1.10.0';
+export const VERSION = '1.10.1';
 const TOOL_DEFS: any[][] = [];
 const server = { tool: (...a: any[]) => { TOOL_DEFS.push(a); } };
 export function buildServer(allow?: Set<string>) {
@@ -132,7 +132,7 @@ server.tool('files_upload', '파일 업로드 URL 생성 (PC 파일을 바로 �
 // 7 다운로드 URL
 server.tool('files_download', '파일 다운로드 URL 생성 (PC 폴더로 바로 받으려면 files_download_to_path)', {
   resourceId: idParam('파일 ID')
-}, async (args) => out(await makeRequest('GET', `/drive/files/${args.resourceId}/download`)));
+}, async (args) => out(await core.download(args.resourceId)));
 
 // 8 복사
 server.tool('files_copy', '파일/폴더 복사', {
@@ -358,6 +358,8 @@ export const core = {
     return makeRequest('POST', `/drive/resources/${resourceId}/copy`, pick(body, ['parentId', 'name', 'isOverwrite'])); },
   move: async (resourceId: string, body: any = {}) => { if (GUARD) { await insideAllowed(resourceId, '이동 원본'); await folderAllowed(body.parentId, '이동 목적지'); }
     return makeRequest('POST', `/drive/resources/${resourceId}/move`, pick(body, ['parentId', 'isOverwrite'])); },
+  download: async (resourceId: string) => { if (GUARD) await insideAllowed(resourceId, '내려받기 대상');
+    return makeRequest('GET', `/drive/files/${resourceId}/download`); },
   putChunk: (args: any) => putChunk(args, jobUploader),
   status: (jobId: string) => jobStatus(jobId),
 };

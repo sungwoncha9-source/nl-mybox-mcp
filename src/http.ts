@@ -45,6 +45,7 @@ async function restRoute(req: http.IncomingMessage, res: http.ServerResponse, bo
   if (req.method === 'GET' && (m = p.match(/^\/api\/v1\/folders\/([^/]+)\/resources$/))) { tool = 'dms_list'; const id = m[1]; fn = () => core.list(id, Object.fromEntries(u.searchParams)); }
   else if (req.method === 'POST' && p === '/api/v1/folders') { tool = 'files_create_folder'; fn = () => core.createFolder(body || {}); }
   else if (req.method === 'POST' && (m = p.match(/^\/api\/v1\/resources\/([^/]+)\/(copy|move)$/))) { const id = m[1], k = m[2]; tool = k === 'copy' ? 'files_copy' : 'files_move'; fn = () => core[k](id, body || {}); }
+  else if (req.method === 'GET' && (m = p.match(/^\/api\/v1\/resources\/([^/]+)\/download$/))) { tool = 'files_download'; const id = m[1]; fn = () => core.download(id); }
   else if (req.method === 'POST' && p === '/api/v1/jobs/chunk') { tool = 'job_put_chunk'; fn = () => core.putChunk(body || {}); }
   else if (req.method === 'GET' && (m = p.match(/^\/api\/v1\/jobs\/([^/]+)$/))) { tool = 'job_status'; const id = m[1]; fn = async () => core.status(id); }
   if (!fn) return send(404, { error: 'not found' });

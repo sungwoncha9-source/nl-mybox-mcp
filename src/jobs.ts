@@ -37,6 +37,8 @@ export type JobState = {
 };
 
 export const ID_RE = /^[A-Za-z0-9_-]{1,64}$/;
+/** 1.10.1: 서비스별 작업 번호 접두어(NL_JOB_PREFIX, 비면 검사 안 함 = 이전과 같음). 같은 서비스를 여러 프로젝트가 쓸 때 서로의 일감을 못 읽게 한다. 호출자(sub)로는 구분할 수 없어(W1-T02) 접두어로 한다 */
+function checkPrefix(id: string) { const pf = (process.env.NL_JOB_PREFIX || '').trim(); if (pf && !String(id || '').startsWith(pf)) throw new Error('not_allowed: job_id는 "' + pf + '"로 시작해야 합니다'); }
 /** 1.9.2: 이름 비교는 모두 이 함수 한 곳으로 한다 — 유니코드 NFC로 맞추고 소문자로 본다(한글 NFC/NFD, 대소문자만 다른 이름을 같은 이름으로 취급) */
 export const normName = (n: string) => String(n).normalize('NFC').toLowerCase();
 const NAME_BAD = /[\\/:*?"<>|\u0000-\u001f]/;
@@ -237,6 +239,7 @@ async function waitFinal(id: string, waitMs: number): Promise<{ waited_ms: numbe
 export async function putChunk(a: ChunkArgs, uploader: Uploader) {
   sweepStale();
   if (!ID_RE.test(a.job_id || '')) throw new Error('job_id는 영문·숫자·_·- 1~64자여야 합니다');
+  checkPrefix(a.job_id);
   if (!Array.isArray(a.files) || a.files.length < 1 || a.files.length > LIMITS.maxFiles) throw new Error('files는 1~' + LIMITS.maxFiles + '개여야 합니다');
   if (a.bundle != null && a.bundle !== 'pack1') throw new Error("bundle은 'pack1'만 쓸 수 있습니다");
   if (a.bundle && a.files.length !== 1) throw new Error('bundle이면 files는 묶음 파일 하나여야 합니다');
@@ -354,6 +357,7 @@ export async function finalize(st: JobState, uploader: Uploader) {
 /** 읽기만 한다(1.7.0: 만료 정리는 타이머와 job_put_chunk가 맡고 여기서는 하지 않는다 → 읽기 전용 표시) */
 export function jobStatus(id: string) {
   if (!ID_RE.test(id || '')) throw new Error('job_id가 올바르지 않습니다');
+  checkPrefix(id);
   const st = load(id);
   if (!st) return { job_id: id, state: 'unknown', final: false, note: '이 job_id의 기록이 없습니다' };
   const base = { ...summary(st), created: st.created, updated: st.updated, staged_dir: st.staged_dir ?? null };

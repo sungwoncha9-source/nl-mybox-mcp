@@ -44249,6 +44249,10 @@ async function restRoute(req, res, body, core2, allow) {
     const id = m[1], k = m[2];
     tool = k === "copy" ? "files_copy" : "files_move";
     fn = () => core2[k](id, body || {});
+  } else if (req.method === "GET" && (m = p.match(/^\/api\/v1\/resources\/([^/]+)\/download$/))) {
+    tool = "files_download";
+    const id = m[1];
+    fn = () => core2.download(id);
   } else if (req.method === "POST" && p === "/api/v1/jobs/chunk") {
     tool = "job_put_chunk";
     fn = () => core2.putChunk(body || {});
@@ -58881,6 +58885,10 @@ import fs from "node:fs";
 import path from "node:path";
 import crypto3 from "node:crypto";
 var ID_RE = /^[A-Za-z0-9_-]{1,64}$/;
+function checkPrefix(id) {
+  const pf = (process.env.NL_JOB_PREFIX || "").trim();
+  if (pf && !String(id || "").startsWith(pf)) throw new Error('not_allowed: job_id\uB294 "' + pf + '"\uB85C \uC2DC\uC791\uD574\uC57C \uD569\uB2C8\uB2E4');
+}
 var normName = (n) => String(n).normalize("NFC").toLowerCase();
 var NAME_BAD = /[\\/:*?"<>|\u0000-\u001f]/;
 var B64 = /^[A-Za-z0-9+/]*={0,2}$/;
@@ -59095,6 +59103,7 @@ async function waitFinal(id, waitMs) {
 async function putChunk(a, uploader) {
   sweepStale();
   if (!ID_RE.test(a.job_id || "")) throw new Error("job_id\uB294 \uC601\uBB38\xB7\uC22B\uC790\xB7_\xB7- 1~64\uC790\uC5EC\uC57C \uD569\uB2C8\uB2E4");
+  checkPrefix(a.job_id);
   if (!Array.isArray(a.files) || a.files.length < 1 || a.files.length > LIMITS.maxFiles) throw new Error("files\uB294 1~" + LIMITS.maxFiles + "\uAC1C\uC5EC\uC57C \uD569\uB2C8\uB2E4");
   if (a.bundle != null && a.bundle !== "pack1") throw new Error("bundle\uC740 'pack1'\uB9CC \uC4F8 \uC218 \uC788\uC2B5\uB2C8\uB2E4");
   if (a.bundle && a.files.length !== 1) throw new Error("bundle\uC774\uBA74 files\uB294 \uBB36\uC74C \uD30C\uC77C \uD558\uB098\uC5EC\uC57C \uD569\uB2C8\uB2E4");
@@ -59234,6 +59243,7 @@ async function finalize2(st, uploader) {
 }
 function jobStatus(id) {
   if (!ID_RE.test(id || "")) throw new Error("job_id\uAC00 \uC62C\uBC14\uB974\uC9C0 \uC54A\uC2B5\uB2C8\uB2E4");
+  checkPrefix(id);
   const st = load(id);
   if (!st) return { job_id: id, state: "unknown", final: false, note: "\uC774 job_id\uC758 \uAE30\uB85D\uC774 \uC5C6\uC2B5\uB2C8\uB2E4" };
   const base = { ...summary(st), created: st.created, updated: st.updated, staged_dir: st.staged_dir ?? null };
@@ -59432,7 +59442,7 @@ async function uploadEntries(st, uploader, edir) {
 
 // src/index.ts
 var GUARD = process.env.NL_TRANSPORT === "http" || process.env.NL_TOOL_GUARD === "1";
-var GUARDED_TOOLS = ["job_put_chunk", "job_status", "dms_list", "files_copy", "files_move", "files_create_folder"];
+var GUARDED_TOOLS = ["job_put_chunk", "job_status", "dms_list", "files_copy", "files_move", "files_create_folder", "files_download"];
 var RID_RE = /^[A-Za-z0-9+=_-]{1,300}$/;
 var deny = (m) => {
   throw new Error("not_allowed: " + m);
@@ -59468,7 +59478,7 @@ async function insideAllowed(id, what) {
   if (!p) deny(what + " \uC0C1\uC704 \uD3F4\uB354\uAC00 \uC5C6\uC2B5\uB2C8\uB2E4");
   await folderAllowed(p, what + "\uC758 \uC0C1\uC704 \uD3F4\uB354");
 }
-var VERSION3 = "1.10.0";
+var VERSION3 = "1.10.1";
 var TOOL_DEFS = [];
 var server = { tool: (...a) => {
   TOOL_DEFS.push(a);
@@ -59543,7 +59553,7 @@ server.tool("files_upload", "\uD30C\uC77C \uC5C5\uB85C\uB4DC URL \uC0DD\uC131 (P
 }, async (args) => out(await makeRequest("POST", "/drive/files", args)));
 server.tool("files_download", "\uD30C\uC77C \uB2E4\uC6B4\uB85C\uB4DC URL \uC0DD\uC131 (PC \uD3F4\uB354\uB85C \uBC14\uB85C \uBC1B\uC73C\uB824\uBA74 files_download_to_path)", {
   resourceId: idParam("\uD30C\uC77C ID")
-}, async (args) => out(await makeRequest("GET", `/drive/files/${args.resourceId}/download`)));
+}, async (args) => out(await core.download(args.resourceId)));
 server.tool("files_copy", "\uD30C\uC77C/\uD3F4\uB354 \uBCF5\uC0AC", {
   resourceId: idParam("\uC6D0\uBCF8 ID"),
   parentId: external_exports.string().optional().describe("\uBCF5\uC0AC\uBCF8\uC744 \uB458 \uD3F4\uB354 ID(\uC0DD\uB7B5 \uC2DC \uB8E8\uD2B8)"),
@@ -59783,6 +59793,10 @@ var core = {
       await folderAllowed(body.parentId, "\uC774\uB3D9 \uBAA9\uC801\uC9C0");
     }
     return makeRequest("POST", `/drive/resources/${resourceId}/move`, pick2(body, ["parentId", "isOverwrite"]));
+  },
+  download: async (resourceId) => {
+    if (GUARD) await insideAllowed(resourceId, "\uB0B4\uB824\uBC1B\uAE30 \uB300\uC0C1");
+    return makeRequest("GET", `/drive/files/${resourceId}/download`);
   },
   putChunk: (args) => putChunk(args, jobUploader),
   status: (jobId) => jobStatus(jobId)
