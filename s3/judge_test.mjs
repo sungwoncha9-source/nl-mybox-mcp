@@ -8,10 +8,18 @@ const rows = []; let bad = 0;
 const expect = (id, what, ok, detail) => { rows.push({ id, what, ok, detail }); if (!ok) bad++; console.log((ok ? 'OK   ' : 'BAD  ') + id + ' ' + what + (detail ? ' :: ' + detail : '')); };
 
 // ---------- 단위: 정상 입력은 PASS ----------
+// 정상 fixture 는 실제 클라우드 실행 원자료 모양 그대로(11-08 22:03·22:06·22:09 S3, 로컬도 같음)
 const good = () => ({
-  baseline: { ...Object.fromEntries(CHECKS.map(k => [k, { pass: false }])), c4_race_after_accept: { state: 'done', resolved: true, uploads: 1, pass: false } },
-  fixed: { ...Object.fromEntries(CHECKS.map(k => [k, { pass: true }])), c4_race_after_accept: { state: 'failed', resolved: true, uploads: 0, pass: true },
-    // 정상 fixture 는 실제 실행 원자료 모양 그대로(11-08 밤 로컬 실행: 깊이2 조회 3·깊이6 조회 15, 모두 done)
+  baseline: {
+    c1_move_out_then_create: { first: 200, afterMove: 200, mybox_writes_after_move: 1, pass: false },
+    c2_deny_then_allow: { first: 403, afterMove: 403, state: undefined, pass: false },
+    c3_allow_then_move_out: { first: 200, firstState: 'done', afterMove: 200, uploads_after_move: 1, pass: false },
+    c4_race_after_accept: { state: 'done', resolved: true, uploads: 1, pass: false } },
+  fixed: {
+    c1_move_out_then_create: { first: 200, afterMove: 403, mybox_writes_after_move: 0, pass: true },
+    c2_deny_then_allow: { first: 403, afterMove: 200, state: 'done', pass: true },
+    c3_allow_then_move_out: { first: 200, firstState: 'done', afterMove: 403, uploads_after_move: 0, pass: true },
+    c4_race_after_accept: { state: 'failed', resolved: true, uploads: 0, pass: true },
     p1_cost_per_job: { depth2_SUB: { status: 200, state: 'done', resource_reads: 3, ms: 9 }, depth6_D5: { status: 200, state: 'done', resource_reads: 15, ms: 23 } },
     r1_restart: { before: 'done', status_after_restart: 200, state_after_restart: 'done', new_job_after_restart: 'done' } },
   guard: { refuses_real_token: true, refuses_base_url: true, refuses_oauth_copy: true, clean_env_ok: true, nonloopback_throws: true }
@@ -52,6 +60,24 @@ mut.push(['baseline.error 기록', o => { o.baseline.error = 'Error: x'; }]);
 mut.push(['baseline 통째 누락', o => { delete o.baseline; }]);
 for (const g of ['refuses_real_token', 'refuses_base_url', 'refuses_oauth_copy', 'clean_env_ok', 'nonloopback_throws']) mut.push([`guard.${g}=false`, o => { o.guard[g] = false; }]);
 mut.push(['guard 통째 누락', o => { delete o.guard; }]);
+// 8차 독립검증 반례(기록된 pass 표시만 믿던 판정기에서 PASS 나던 입력)
+mut.push(['NV8-1 baseline 이 pass:false 표시만 있고 원자료 없음', o => { for (const k of CHECKS) o.baseline[k] = { pass: false }; }]);
+mut.push(['NV8-2 baseline HTTP 전부 0(서버 못 띄움)·pass:false', o => { for (const k of CHECKS) o.baseline[k] = { first: 0, afterMove: 0, mybox_writes_after_move: 0, uploads_after_move: 0, state: undefined, resolved: false, uploads: 0, pass: false }; }]);
+mut.push(['NV8-3 fixed c1 원자료 쓰기 1 + pass:true', o => { o.fixed.c1_move_out_then_create.mybox_writes_after_move = 1; }]);
+// 원자료 하나씩 비틀기(수정본)
+mut.push(['fixed c1 이동 뒤 200', o => { o.fixed.c1_move_out_then_create.afterMove = 200; }]);
+mut.push(['fixed c2 이동 뒤 403', o => { o.fixed.c2_deny_then_allow.afterMove = 403; }]);
+mut.push(['fixed c2 첫 요청 200(허용 밖인데 통과)', o => { o.fixed.c2_deny_then_allow.first = 200; }]);
+mut.push(['fixed c3 업로드 1 + pass:true', o => { o.fixed.c3_allow_then_move_out.uploads_after_move = 1; }]);
+mut.push(['fixed c3 첫 요청 0(연결 실패)', o => { o.fixed.c3_allow_then_move_out.first = 0; }]);
+mut.push(['fixed c1 쓰기 수 문자열 "0"', o => { o.fixed.c1_move_out_then_create.mybox_writes_after_move = '0'; }]);
+// 원자료 하나씩 비틀기(기준본: 결함이 재현되지 않으면 대조 실패)
+mut.push(['baseline c1 쓰기 0(결함 미재현)', o => { o.baseline.c1_move_out_then_create.mybox_writes_after_move = 0; }]);
+mut.push(['baseline c2 이동 뒤 200(결함 미재현)', o => { o.baseline.c2_deny_then_allow.afterMove = 200; }]);
+mut.push(['baseline c3 이동 뒤 403', o => { o.baseline.c3_allow_then_move_out.afterMove = 403; }]);
+mut.push(['baseline c4 failed·업로드 0(결함 미재현)', o => { o.baseline.c4_race_after_accept = { state: 'failed', resolved: true, uploads: 0, pass: false }; }]);
+mut.push(['baseline c4 업로드 문자열 "1"', o => { o.baseline.c4_race_after_accept.uploads = '1'; }]);
+mut.push(['baseline 항목이 문자열', o => { o.baseline.c2_deny_then_allow = 'x'; }]);
 let n = 0;
 for (const [name, f] of mut) { const o = good(); f(o); const v = judge(o); expect('U' + (++n), name + ' → FAIL', v.verdict === 'FAIL' && v.reasons.length > 0, v.reasons[0]); }
 expect('U' + (++n), 'judge(undefined) → FAIL', judge(undefined).verdict === 'FAIL');

@@ -23,10 +23,10 @@ export interface Uploader {
 }
 type FileState = {
   size: number; sha256: string; ranges: Array<[number, number]>; done: boolean;
-  uploaded?: boolean; verified?: boolean; error?: string;
+  uploaded?: boolean; verified?: boolean; error?: string; escaped?: boolean;
 };
 /** 1.9.0: 묶음(pack1) 안의 파일 하나의 진행·결과 */
-export type EntryState = { id: number; name: string; size: number; sha256: string; parent_id?: string; target?: string; unpacked?: boolean; uploaded?: boolean; size_verified?: boolean; content_verified?: boolean; verified?: boolean; error?: string };
+export type EntryState = { id: number; name: string; size: number; sha256: string; parent_id?: string; target?: string; unpacked?: boolean; uploaded?: boolean; size_verified?: boolean; content_verified?: boolean; verified?: boolean; error?: string; escaped?: boolean };
 export type JobState = {
   job_id: string; created: string; updated: string;
   state: 'receiving' | 'finalizing' | 'done' | 'dry_run_done' | 'failed';
@@ -110,6 +110,12 @@ export async function checkAllowed(parentId: string | undefined, uploader: Uploa
   }
   cache.set(parentId, ok);
   if (!ok) throw new Error('not_allowed: 허용되지 않은 폴더입니다: ' + parentId);
+}
+/** 올린 뒤 재확인(잔여 틈 K3 탐지): 마지막 재확인과 실제 올리기 사이에 폴더가 허용 밖으로 옮겨졌으면 막을 수는 없고, 올린 직후 다시 판정해 「허용 밖에 올라갔다」를 남긴다.
+ *  파일은 지우거나 옮기지 않는다(허용 밖 위치에 쓰기를 더 하지 않기 위해). 사람이 보고 정한다. */
+async function escapedAfterUpload(target: string | undefined, uploader: Uploader): Promise<string | null> {
+  try { await checkAllowed(target, uploader); return null; }
+  catch (e: any) { return 'escaped_after_upload: 올린 뒤 다시 보니 폴더(' + target + ')가 허용 범위 밖입니다 — 올리는 사이 폴더가 옮겨진 것으로 보입니다. 파일은 MYBOX에 남아 있고 지우지 않았습니다(' + String(e && e.message || e).slice(0, 120) + ')'; }
 }
 const resultPath = (id: string) => path.join(jobsRoot(), '_results', id + '.json');
 const stagePath = (id: string) => path.join(jobsRoot(), id);
@@ -196,7 +202,7 @@ function summary(st: JobState) {
     job_id: st.job_id, state: st.state, files_total: names.length,
     files_done: names.filter(n => st.files[n].done).length,
     files: names.map(n => ({ name: n, size: st.files[n].size, received: receivedOf(st.files[n]), done: st.files[n].done,
-      uploaded: st.files[n].uploaded ?? null, verified: st.files[n].verified ?? null, error: st.files[n].error ?? null })),
+      uploaded: st.files[n].uploaded ?? null, verified: st.files[n].verified ?? null, error: st.files[n].error ?? null, ...(st.files[n].escaped ? { escaped: true } : {}) })),
     error: st.error ?? null,
     final: FINAL.has(st.state),
     subfolder: st.spec.opts.subfolder ?? null, folder_id: st.folder_id ?? null,
@@ -330,6 +336,8 @@ export async function finalize(st: JobState, uploader: Uploader) {
         await checkAllowed(target, uploader);   // 파일마다 올리기 직전에 다시 판정
         await uploader.upload(path.join(dir, f.name), target, !!o.isOverwrite);
         st.files[f.name].uploaded = true; save(st);
+        const esc = await escapedAfterUpload(target, uploader);   // K3: 올린 뒤 재확인(탐지). 걸리면 나머지는 올리지 않고 일감 실패
+        if (esc) { st.files[f.name].escaped = true; st.files[f.name].error = esc; save(st); throw new Error(esc); }
       }
       for (const f of st.spec.files) {
         const v = await uploader.verify(f.name, f.size, target);
@@ -444,6 +452,8 @@ async function uploadEntries(st: JobState, uploader: Uploader, edir: string) {
       if (ex && ex.name !== e.name) { e.error = 'case_conflict: 이름이 대소문자·글자 구성만 다른 기존 파일(' + ex.name + ')이 있어 덮어쓰기 대상이 모호해 올리지 않았습니다'; save(st); return; }
       await checkAllowed(e.target, uploader);   // 실제 올리기 직전에 다시 판정(검사 뒤 폴더가 옮겨진 경우를 막음)
       await uploader.upload(path.join(edir, String(e.id), e.name), e.target, !!o.isOverwrite); e.uploaded = true; save(st);
+      const esc = await escapedAfterUpload(e.target, uploader);   // K3: 올린 뒤 재확인(탐지)
+      if (esc) { e.escaped = true; e.error = esc; save(st); }
     } catch (err: any) { e.error = String(err && err.message || err).slice(0, 300); save(st); }
   };
   const conc = Math.max(1, Math.min(LIMITS.maxConc, o.uploadConcurrency || 1)); let qi = 0;
@@ -463,5 +473,6 @@ async function uploadEntries(st: JobState, uploader: Uploader, edir: string) {
     }
     e.verified = e.size_verified && (!o.verifyContent || e.content_verified === true);
   }
+  for (const e of up) if (e.escaped && !String(e.error || '').startsWith('escaped_after_upload')) e.error = 'escaped_after_upload: 올린 뒤 폴더가 허용 범위 밖으로 바뀜(파일은 MYBOX에 남아 있음); ' + (e.error || '');   // 대조 단계가 덮어써도 탐지 사실은 남긴다
   save(st);
 }

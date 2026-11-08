@@ -58972,6 +58972,14 @@ async function checkAllowed(parentId, uploader, cache2 = /* @__PURE__ */ new Map
   cache2.set(parentId, ok);
   if (!ok) throw new Error("not_allowed: \uD5C8\uC6A9\uB418\uC9C0 \uC54A\uC740 \uD3F4\uB354\uC785\uB2C8\uB2E4: " + parentId);
 }
+async function escapedAfterUpload(target, uploader) {
+  try {
+    await checkAllowed(target, uploader);
+    return null;
+  } catch (e) {
+    return "escaped_after_upload: \uC62C\uB9B0 \uB4A4 \uB2E4\uC2DC \uBCF4\uB2C8 \uD3F4\uB354(" + target + ")\uAC00 \uD5C8\uC6A9 \uBC94\uC704 \uBC16\uC785\uB2C8\uB2E4 \u2014 \uC62C\uB9AC\uB294 \uC0AC\uC774 \uD3F4\uB354\uAC00 \uC62E\uACA8\uC9C4 \uAC83\uC73C\uB85C \uBCF4\uC785\uB2C8\uB2E4. \uD30C\uC77C\uC740 MYBOX\uC5D0 \uB0A8\uC544 \uC788\uACE0 \uC9C0\uC6B0\uC9C0 \uC54A\uC558\uC2B5\uB2C8\uB2E4(" + String(e && e.message || e).slice(0, 120) + ")";
+  }
+}
 var resultPath = (id) => path.join(jobsRoot(), "_results", id + ".json");
 var stagePath = (id) => path.join(jobsRoot(), id);
 var mem = /* @__PURE__ */ new Map();
@@ -59068,7 +59076,8 @@ function summary(st) {
       done: st.files[n].done,
       uploaded: st.files[n].uploaded ?? null,
       verified: st.files[n].verified ?? null,
-      error: st.files[n].error ?? null
+      error: st.files[n].error ?? null,
+      ...st.files[n].escaped ? { escaped: true } : {}
     })),
     error: st.error ?? null,
     final: FINAL.has(st.state),
@@ -59210,6 +59219,13 @@ async function finalize2(st, uploader) {
         await uploader.upload(path.join(dir, f.name), target, !!o.isOverwrite);
         st.files[f.name].uploaded = true;
         save(st);
+        const esc2 = await escapedAfterUpload(target, uploader);
+        if (esc2) {
+          st.files[f.name].escaped = true;
+          st.files[f.name].error = esc2;
+          save(st);
+          throw new Error(esc2);
+        }
       }
       for (const f of st.spec.files) {
         const v = await uploader.verify(f.name, f.size, target);
@@ -59393,6 +59409,12 @@ async function uploadEntries(st, uploader, edir) {
       await uploader.upload(path.join(edir, String(e.id), e.name), e.target, !!o.isOverwrite);
       e.uploaded = true;
       save(st);
+      const esc2 = await escapedAfterUpload(e.target, uploader);
+      if (esc2) {
+        e.escaped = true;
+        e.error = esc2;
+        save(st);
+      }
     } catch (err) {
       e.error = String(err && err.message || err).slice(0, 300);
       save(st);
@@ -59430,6 +59452,7 @@ async function uploadEntries(st, uploader, edir) {
     }
     e.verified = e.size_verified && (!o.verifyContent || e.content_verified === true);
   }
+  for (const e of up) if (e.escaped && !String(e.error || "").startsWith("escaped_after_upload")) e.error = "escaped_after_upload: \uC62C\uB9B0 \uB4A4 \uD3F4\uB354\uAC00 \uD5C8\uC6A9 \uBC94\uC704 \uBC16\uC73C\uB85C \uBC14\uB01C(\uD30C\uC77C\uC740 MYBOX\uC5D0 \uB0A8\uC544 \uC788\uC74C); " + (e.error || "");
   save(st);
 }
 

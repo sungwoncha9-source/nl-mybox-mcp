@@ -15,15 +15,28 @@ export function childEnv(base, fakeUrl, extra) {
   if (!/^http:\/\/127\.0\.0\.1:\d+\//.test(e.MYBOX_BASE_URL)) throw new Error('MYBOX_BASE_URL 이 루프백이 아님: 시작 거부');
   return e;
 }
+// 메모리 관측(판정에는 넣지 않는 관측값): 컨테이너(cgroup) 최고치가 있으면 그것을, 없으면 표본 최고치와 프로세스별 최고(VmHWM)를 남긴다.
+export function memProbe() {
+  const rd = f => { try { return fs.readFileSync(f, 'utf8').trim(); } catch { return null; } };
+  const num = v => (v == null || v === 'max' || !/^\d+$/.test(v)) ? null : +v;
+  const cur = () => num(rd('/sys/fs/cgroup/memory.current')) ?? num(rd('/sys/fs/cgroup/memory/memory.usage_in_bytes'));
+  const lim0 = num(rd('/sys/fs/cgroup/memory.max')) ?? num(rd('/sys/fs/cgroup/memory/memory.limit_in_bytes')); const limit = lim0 != null && lim0 < 2 ** 50 ? lim0 : null;   // 제한 없음(아주 큰 값)은 null
+  let sampleMax = cur() || 0, samples = 0;
+  const t = setInterval(() => { const c = cur(); if (c != null) { samples++; if (c > sampleMax) sampleMax = c; } }, 200); t.unref();
+  return () => { clearInterval(t); const MB = b => b == null ? null : Math.round(b / 1048576 * 10) / 10;
+    const peak = num(rd('/sys/fs/cgroup/memory.peak')) ?? num(rd('/sys/fs/cgroup/memory/memory.max_usage_in_bytes'));
+    return { cgroup_peak_mb: MB(peak), cgroup_sample_max_mb: MB(sampleMax || null), samples, cgroup_limit_mb: MB(limit), start_proc_max_rss_mb: MB(process.resourceUsage().maxRSS * 1024), note: 'cgroup_peak 는 컨테이너 전체 최고치(커널 기록). 없으면 200ms 표본 최고치만(최고점을 놓칠 수 있음). 판정에는 넣지 않음.' }; };
+}
 const isMain = process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url);
 if (isMain) {
   const bad = guardEnv(process.env);
   if (bad.length) { console.error('S3 시작 거부: ' + bad.join(' / ')); process.exit(3); }
-  const fake = await startFake(); const results = { startedAt: new Date().toISOString(), node: process.version, status: 'running', note: '합성 데이터만. 실제 MYBOX·토큰 없음.' };
+  const memStop = memProbe(); const fake = await startFake(); const results = { startedAt: new Date().toISOString(), node: process.version, status: 'running', note: '합성 데이터만. 실제 MYBOX·토큰 없음.' };
   const PORT = +process.env.PORT || 3000;
   http.createServer((q, r) => { r.setHeader('content-type', 'application/json; charset=utf-8'); r.end(JSON.stringify(q.url.startsWith('/selftest.json') ? results : { service: 'S3 시험(합성)', see: '/selftest.json' }, null, 1)); }).listen(PORT, '0.0.0.0', () => console.log('S3 status on :' + PORT));
   const root = path.resolve(HERE, '..');
   try { results.checks = await runSelfTest({ fakePort: fake.port, bundles: { baseline: path.join(HERE, 'baseline-http.mjs'), fixed: path.join(root, 'mybox-mcp-http.mjs') }, tmp: fs.mkdtempSync(path.join(os.tmpdir(), 's3-')), log: (...a) => console.log(...a), childEnv, guardEnv }); const v = judge(results.checks); results.verdict = v.verdict; results.reasons = v.reasons; results.status = v.verdict === 'PASS' ? 'selftest-pass' : 'selftest-fail'; }
   catch (e) { results.status = 'selftest-error'; results.error = String(e && e.stack || e).slice(0, 2000); console.error(results.error); }
+  results.mem = memStop(); console.log('SELFTEST_MEM ' + JSON.stringify(results.mem));
   console.log('SELFTEST_RESULT ' + JSON.stringify(results));
 }

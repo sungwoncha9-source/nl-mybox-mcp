@@ -1,5 +1,6 @@
 // S3 컨테이너 안에서 도는 자체 시험: 기준 번들(w1/deploy-b1)과 수정 번들을 같은 가짜 MYBOX로 비교한다. 합성 데이터만.
 import http from 'node:http'; import fs from 'node:fs'; import path from 'node:path'; import crypto from 'node:crypto'; import { spawn } from 'node:child_process';
+const hwm = pid => { try { const m = /VmHWM:\s+(\d+) kB/.exec(fs.readFileSync('/proc/' + pid + '/status', 'utf8')); return m ? Math.round(+m[1] / 1024 * 10) / 10 : null; } catch { return null; } };   // 자식 프로세스 최고 메모리(관측값)
 const ALL6 = 'job_put_chunk,job_status,dms_list,files_copy,files_move,files_create_folder';
 export async function runSelfTest({ fakePort, bundles, tmp, log, childEnv, guardEnv }) {
   const FAKE = 'http://127.0.0.1:' + fakePort; const BASE = FAKE + '/v1';
@@ -47,7 +48,7 @@ export async function runSelfTest({ fakePort, bundles, tmp, log, childEnv, guard
       await ctl('reset'); const rid = id(); a = await q('POST', '/api/v1/jobs/chunk', job(rid, 'SUB')); S.p.kill(); await sleep(500); S = await start(file, JOBS, TOKEN); b = await q('GET', '/api/v1/jobs/' + rid); const c = await q('POST', '/api/v1/jobs/chunk', job(id(), 'SUB'));
       R.r1_restart = { before: a.json && a.json.state, status_after_restart: b.status, state_after_restart: b.json && b.json.state, new_job_after_restart: c.json && c.json.state, pass: null, expect: '관측값' };
     } catch (e) { R.error = String(e && e.stack || e).slice(0, 800); }
-    finally { try { S.p.kill(); } catch {} }
+    finally { R.child_vmhwm_mb = hwm(S.p.pid); try { S.p.kill(); } catch {} }
     out[name] = R; log('SELFTEST ' + name + ' ' + JSON.stringify(R));
   }
   out.guard = { refuses_real_token: guardEnv({ MYBOX_ACCESS_TOKEN: 'x' }).length > 0, refuses_base_url: guardEnv({ MYBOX_BASE_URL: 'https://open-api.mybox.naver.com/v1' }).length > 0, refuses_oauth_copy: guardEnv({ NL_OAUTH_ISSUER: 'x' }).length > 0, clean_env_ok: guardEnv({}).length === 0 };
@@ -56,28 +57,50 @@ export async function runSelfTest({ fakePort, bundles, tmp, log, childEnv, guard
   return out;
 }
 
-// 전체 판정: 개별 항목의 pass 를 하나로 합친다. 예외 없이 끝났다는 사실(이전의 'selftest-done')은 합격이 아니다.
-// 1) 수정 번들(fixed)의 c1~c4 가 모두 통과, 2) 기준 번들(baseline)은 같은 c1~c4 를 모두 실패(결함을 잡는 시험이라는 대조),
-// 3) 시험 도중 오류(error)가 없음, 4) 관측 항목(p1·r1)이 실제로 관측됨, 5) 시작 가드 다섯 항목이 모두 기대대로.
-// c4 는 기록된 pass 를 믿지 않고 원자료(끝까지 처리됨·상태 failed·업로드 0)로 다시 판정한다.
+// 전체 판정(9판, 8차 검증 반영): 항목에 기록된 pass 표시는 믿지 않고 원자료(HTTP 상태·쓰기/업로드 수·일감 상태)로 다시 판정한다.
+// 1) 수정 번들(fixed) c1~c4 의 원자료가 「결함 없음」 모양, 2) 기준 번들(baseline) c1~c4 의 원자료가 「알려진 결함」 모양 그대로
+//    (그냥 실패가 아니라 결함이 재현된 모양이어야 대조가 성립: HTTP 0·오류로 실패한 것은 대조가 아님),
+// 3) 기록된 pass 표시가 원자료 판정과 다르면 기록기 고장으로 보고 불합격, 4) 시험 도중 오류 없음, 5) p1·r1 관측 정상, 6) 시작 가드 다섯 항목.
 export const CHECKS = ['c1_move_out_then_create', 'c2_deny_then_allow', 'c3_allow_then_move_out', 'c4_race_after_accept'];
+const isInt = v => Number.isInteger(v);
+// 수정본이 가져야 할 원자료 모양(결함 없음)
+export const FIXED_SIG = {
+  c1_move_out_then_create: c => c.first === 200 && c.afterMove === 403 && c.mybox_writes_after_move === 0,
+  c2_deny_then_allow: c => c.first === 403 && c.afterMove === 200,
+  c3_allow_then_move_out: c => c.first === 200 && c.afterMove === 403 && c.uploads_after_move === 0,
+  c4_race_after_accept: c => c.resolved === true && c.state === 'failed' && c.uploads === 0,
+};
+// 기준본(w1/deploy-b1)이 보여야 할 원자료 모양(알려진 결함이 재현됨)
+export const BASE_SIG = {
+  c1_move_out_then_create: c => c.first === 200 && c.afterMove === 200 && isInt(c.mybox_writes_after_move) && c.mybox_writes_after_move >= 1,   // OK_UNTIL: 옮긴 뒤에도 통과·쓰기 생김
+  c2_deny_then_allow: c => c.first === 403 && c.afterMove === 403,   // ALLOW_CACHE: 거절이 고착
+  c3_allow_then_move_out: c => c.first === 200 && c.afterMove === 200 && isInt(c.uploads_after_move) && c.uploads_after_move >= 1,   // ALLOW_CACHE: 통과가 고착·업로드 생김
+  c4_race_after_accept: c => c.resolved === true && c.state === 'done' && isInt(c.uploads) && c.uploads >= 1,   // 재확인 없음: 옮겨진 폴더로 올라감
+};
 export function judge(out) {
   const why = []; const o = out || {};
-  const c4ok = c => !!c && c.resolved === true && c.state === 'failed' && c.uploads === 0;
   const fx = o.fixed, bl = o.baseline;
-  if (!fx) why.push('fixed(수정 번들) 결과 없음');
-  else {
-    if (fx.error) why.push('fixed 시험 도중 오류: ' + String(fx.error).split('\n')[0]);
-    for (const k of CHECKS) { const c = fx[k]; if (!c) why.push('fixed ' + k + ' 결과 없음'); else if (c.pass !== true) why.push('fixed ' + k + ' 불합격'); }
-    if (fx.c4_race_after_accept && !c4ok(fx.c4_race_after_accept)) why.push('fixed c4 원자료가 합격 조건(끝까지 처리·failed·업로드 0)이 아님');
-    // P1(7차 검증 NV7-02): 깊이마다 HTTP 200 + 일감 완료(done) + 처리 시간이 유한한 0 이상 수 + 폴더 조회 수가 1 이상 정수.
-    // 조회 1회 이상인 이유: 수정 번들은 캐시를 없애 일감마다 폴더를 다시 확인해야 한다. 0회는 관측 누락이거나 캐시가 되살아난 것(기준 번들의 0회가 그 결함).
-    // 시간·조회 수의 상한은 합의된 기준이 없어 두지 않는다(관측값으로만 기록).
+  const side = (name, R, sig, expectPass) => {
+    if (!R) { why.push(name + ' 결과 없음'); return; }
+    if (R.error) why.push(name + ' 시험 도중 오류: ' + String(R.error).split('\n')[0]);
+    for (const k of CHECKS) {
+      const c = R[k];
+      if (!c || typeof c !== 'object') { why.push(name + ' ' + k + ' 결과 없음'); continue; }
+      const raw = !!sig[k](c);
+      if (!raw) why.push(name + ' ' + k + ' 원자료가 기대 모양이 아님(' + (expectPass ? '결함 없음' : '알려진 결함 재현') + '): ' + JSON.stringify(c));
+      const shouldPass = expectPass ? raw : !raw;   // 원자료로 본 이 항목의 합격 여부(기준본은 결함이 재현되면 pass=false 가 맞음)
+      if (raw && c.pass !== shouldPass) why.push(name + ' ' + k + ' 기록된 pass(' + c.pass + ')가 원자료 판정과 다름(기록기 고장)');
+    }
+  };
+  side('fixed', fx, FIXED_SIG, true);
+  side('baseline', bl, BASE_SIG, false);
+  if (fx) {
+    // P1(7차 NV7-02): 깊이마다 HTTP 200 + done + ms 유한 0 이상 + 조회 1 이상 정수. 상한은 합의 기준이 없어 두지 않음.
     const p = fx.p1_cost_per_job;
-    const p1ok = c => !!c && c.status === 200 && c.state === 'done' && Number.isFinite(c.ms) && c.ms >= 0 && Number.isInteger(c.resource_reads) && c.resource_reads >= 1;
+    const p1ok = c => !!c && c.status === 200 && c.state === 'done' && Number.isFinite(c.ms) && c.ms >= 0 && isInt(c.resource_reads) && c.resource_reads >= 1;
     if (!p) why.push('fixed p1 관측 누락');
     else for (const k of ['depth2_SUB', 'depth6_D5']) if (!p1ok(p[k])) why.push('fixed p1 ' + k + ' 관측 비정상: ' + JSON.stringify(p[k] === undefined ? null : p[k]));
-    // R1(7차 검증 NV7-01): 재시작 전 일감 done, 재시작 뒤 그 기록이 200으로 읽히고 상태가 done 그대로(기록 보존), 재시작 뒤 새 일감도 done.
+    // R1(7차 NV7-01): 재시작 전 done, 재시작 뒤 기존 기록 200·done, 새 일감 done.
     const r = fx.r1_restart;
     if (!r) why.push('fixed r1 재시작 관측 누락');
     else {
@@ -85,11 +108,6 @@ export function judge(out) {
       if (r.status_after_restart !== 200 || r.state_after_restart !== 'done') why.push('fixed r1 재시작 뒤 기존 기록 보존 안 됨: ' + r.status_after_restart + '/' + r.state_after_restart);
       if (r.new_job_after_restart !== 'done') why.push('fixed r1 재시작 뒤 새 일감이 done 아님: ' + r.new_job_after_restart);
     }
-  }
-  if (!bl) why.push('baseline(기준 번들) 결과 없음');
-  else {
-    if (bl.error) why.push('baseline 시험 도중 오류: ' + String(bl.error).split('\n')[0]);
-    for (const k of CHECKS) { const c = bl[k]; if (!c) why.push('baseline ' + k + ' 결과 없음'); else if (c.pass !== false) why.push('baseline ' + k + ' 가 통과함: 결함을 못 잡는 시험(대조 실패)'); }
   }
   const g = o.guard; const want = { refuses_real_token: true, refuses_base_url: true, refuses_oauth_copy: true, clean_env_ok: true, nonloopback_throws: true };
   if (!g) why.push('guard 결과 없음'); else for (const [k, v] of Object.entries(want)) if (g[k] !== v) why.push('guard ' + k + ' 기대 ' + v + ' 실제 ' + g[k]);
