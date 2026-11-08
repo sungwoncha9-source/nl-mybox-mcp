@@ -70,8 +70,21 @@ export function judge(out) {
     if (fx.error) why.push('fixed 시험 도중 오류: ' + String(fx.error).split('\n')[0]);
     for (const k of CHECKS) { const c = fx[k]; if (!c) why.push('fixed ' + k + ' 결과 없음'); else if (c.pass !== true) why.push('fixed ' + k + ' 불합격'); }
     if (fx.c4_race_after_accept && !c4ok(fx.c4_race_after_accept)) why.push('fixed c4 원자료가 합격 조건(끝까지 처리·failed·업로드 0)이 아님');
-    const p = fx.p1_cost_per_job; if (!p || !p.depth2_SUB || !p.depth6_D5 || p.depth2_SUB.status !== 200 || p.depth6_D5.status !== 200) why.push('fixed p1 관측 누락 또는 비정상');
-    const r = fx.r1_restart; if (!r || r.status_after_restart !== 200 || !r.new_job_after_restart) why.push('fixed r1 재시작 관측 누락 또는 비정상');
+    // P1(7차 검증 NV7-02): 깊이마다 HTTP 200 + 일감 완료(done) + 처리 시간이 유한한 0 이상 수 + 폴더 조회 수가 1 이상 정수.
+    // 조회 1회 이상인 이유: 수정 번들은 캐시를 없애 일감마다 폴더를 다시 확인해야 한다. 0회는 관측 누락이거나 캐시가 되살아난 것(기준 번들의 0회가 그 결함).
+    // 시간·조회 수의 상한은 합의된 기준이 없어 두지 않는다(관측값으로만 기록).
+    const p = fx.p1_cost_per_job;
+    const p1ok = c => !!c && c.status === 200 && c.state === 'done' && Number.isFinite(c.ms) && c.ms >= 0 && Number.isInteger(c.resource_reads) && c.resource_reads >= 1;
+    if (!p) why.push('fixed p1 관측 누락');
+    else for (const k of ['depth2_SUB', 'depth6_D5']) if (!p1ok(p[k])) why.push('fixed p1 ' + k + ' 관측 비정상: ' + JSON.stringify(p[k] === undefined ? null : p[k]));
+    // R1(7차 검증 NV7-01): 재시작 전 일감 done, 재시작 뒤 그 기록이 200으로 읽히고 상태가 done 그대로(기록 보존), 재시작 뒤 새 일감도 done.
+    const r = fx.r1_restart;
+    if (!r) why.push('fixed r1 재시작 관측 누락');
+    else {
+      if (r.before !== 'done') why.push('fixed r1 재시작 전 일감이 done 아님: ' + r.before);
+      if (r.status_after_restart !== 200 || r.state_after_restart !== 'done') why.push('fixed r1 재시작 뒤 기존 기록 보존 안 됨: ' + r.status_after_restart + '/' + r.state_after_restart);
+      if (r.new_job_after_restart !== 'done') why.push('fixed r1 재시작 뒤 새 일감이 done 아님: ' + r.new_job_after_restart);
+    }
   }
   if (!bl) why.push('baseline(기준 번들) 결과 없음');
   else {

@@ -11,7 +11,9 @@ const expect = (id, what, ok, detail) => { rows.push({ id, what, ok, detail }); 
 const good = () => ({
   baseline: { ...Object.fromEntries(CHECKS.map(k => [k, { pass: false }])), c4_race_after_accept: { state: 'done', resolved: true, uploads: 1, pass: false } },
   fixed: { ...Object.fromEntries(CHECKS.map(k => [k, { pass: true }])), c4_race_after_accept: { state: 'failed', resolved: true, uploads: 0, pass: true },
-    p1_cost_per_job: { depth2_SUB: { status: 200 }, depth6_D5: { status: 200 } }, r1_restart: { status_after_restart: 200, new_job_after_restart: 'done' } },
+    // 정상 fixture 는 실제 실행 원자료 모양 그대로(11-08 밤 로컬 실행: 깊이2 조회 3·깊이6 조회 15, 모두 done)
+    p1_cost_per_job: { depth2_SUB: { status: 200, state: 'done', resource_reads: 3, ms: 9 }, depth6_D5: { status: 200, state: 'done', resource_reads: 15, ms: 23 } },
+    r1_restart: { before: 'done', status_after_restart: 200, state_after_restart: 'done', new_job_after_restart: 'done' } },
   guard: { refuses_real_token: true, refuses_base_url: true, refuses_oauth_copy: true, clean_env_ok: true, nonloopback_throws: true }
 });
 { const v = judge(good()); expect('U0', '정상 입력 → PASS', v.verdict === 'PASS' && v.reasons.length === 0, JSON.stringify(v)); }
@@ -31,6 +33,19 @@ mut.push(['fixed.p1 depth6 상태 500', o => { o.fixed.p1_cost_per_job.depth6_D5
 mut.push(['fixed.r1 누락', o => { delete o.fixed.r1_restart; }]);
 mut.push(['fixed.r1 재시작 뒤 조회 404', o => { o.fixed.r1_restart.status_after_restart = 404; }]);
 mut.push(['fixed.r1 새 일감 상태 없음', o => { o.fixed.r1_restart.new_job_after_restart = undefined; }]);
+// 7차 독립검증 반례(NV7-01·02)와 그 주변값
+for (const s of ['failed', 'unknown', 'broken', 'accepted', '', null]) mut.push([`NV7-01 r1 새 일감 ${JSON.stringify(s)}`, o => { o.fixed.r1_restart.new_job_after_restart = s; }]);
+mut.push(['r1 재시작 전 일감 failed', o => { o.fixed.r1_restart.before = 'failed'; }]);
+mut.push(['r1 재시작 뒤 기존 기록 상태 unknown(기록 유실)', o => { o.fixed.r1_restart.state_after_restart = 'unknown'; }]);
+mut.push(['r1 재시작 뒤 기존 기록 상태 없음', o => { delete o.fixed.r1_restart.state_after_restart; }]);
+mut.push(['NV7-02 p1 ms·resource_reads 둘 다 없음(검증자 fixture 그대로)', o => { o.fixed.p1_cost_per_job = { depth2_SUB: { status: 200 }, depth6_D5: { status: 200 } }; }]);
+mut.push(['NV7-02a p1 조회 0회(두 깊이)', o => { o.fixed.p1_cost_per_job.depth2_SUB.resource_reads = 0; o.fixed.p1_cost_per_job.depth6_D5.resource_reads = 0; }]);
+mut.push(['p1 깊이2 조회 0회만', o => { o.fixed.p1_cost_per_job.depth2_SUB.resource_reads = 0; }]);
+for (const [lab, v] of [['NaN', NaN], ['null', null], ['음수', -1], ['문자열', '3'], ['소수', 2.5], ['Infinity', Infinity]]) mut.push([`p1 resource_reads ${lab}`, o => { o.fixed.p1_cost_per_job.depth6_D5.resource_reads = v; }]);
+for (const [lab, v] of [['NaN', NaN], ['null', null], ['음수', -5], ['Infinity', Infinity], ['문자열', '9']]) mut.push([`p1 ms ${lab}`, o => { o.fixed.p1_cost_per_job.depth2_SUB.ms = v; }]);
+mut.push(['p1 ms 누락', o => { delete o.fixed.p1_cost_per_job.depth6_D5.ms; }]);
+for (const s of ['failed', 'accepted', undefined]) mut.push([`p1 일감 상태 ${JSON.stringify(s)}`, o => { o.fixed.p1_cost_per_job.depth6_D5.state = s; }]);
+mut.push(['p1 깊이6 항목 누락', o => { delete o.fixed.p1_cost_per_job.depth6_D5; }]);
 for (const k of CHECKS) mut.push([`J6 baseline.${k} 가 통과(대조 실패)`, o => { o.baseline[k].pass = true; }]);
 mut.push(['J6 baseline 전부 통과', o => { for (const k of CHECKS) o.baseline[k].pass = true; }]);
 mut.push(['baseline.error 기록', o => { o.baseline.error = 'Error: x'; }]);
