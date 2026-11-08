@@ -9,6 +9,7 @@
 //       · 출입증이 없거나 틀리면 401 + WWW-Authenticate에 안내 주소(resource_metadata)를 실어 Claude가 로그인 창을 열게 한다.
 //       · 안내 주소: /.well-known/oauth-protected-resource(/mcp) — RFC 9728. 인증 없이 읽힌다(비밀 없음).
 //       · 고정 토큰은 oauth 모드에서 통하지 않는다.
+//  ④ (w1/json-response) POST 응답을 SSE가 아니라 JSON 한 번에 돌려주고(enableJsonResponse), GET /mcp는 405.
 //  ③ Host 허용에 공개 주소(NL_PUBLIC_URL)의 이름을 더한다(클라우드에서는 바깥 이름으로 들어오므로).
 import http from 'node:http';
 import crypto from 'node:crypto';
@@ -111,6 +112,8 @@ export async function runHttp(buildServer: (allow: Set<string>) => any, core?: a
       let body: any = undefined;
       if (req.method === 'POST') { const chunks: Buffer[] = []; let n = 0; for await (const c of req) { n += (c as Buffer).length; if (n > 4 * 1024 * 1024) return deny(413, 'too large'); chunks.push(c as Buffer); } try { body = JSON.parse(Buffer.concat(chunks).toString('utf8')); } catch { return deny(400, 'bad json'); } }
       if (path.startsWith('/api/v1/')) return await restRoute(req, res, body, core, allowTools);
+      // 응답은 JSON 한 번에(SSE 스트림 없음). 서버가 먼저 보내는 알림이 없으므로 GET 스트림은 열지 않는다(스펙상 405 허용).
+      if (req.method === 'GET') { res.setHeader('allow', 'POST, DELETE, OPTIONS'); return deny(405, 'method not allowed'); }
       const sid = String(req.headers['mcp-session-id'] || '');
       if (sid) {
         const e = sessions.get(sid);
@@ -124,7 +127,7 @@ export async function runHttp(buildServer: (allow: Set<string>) => any, core?: a
       if (req.method !== 'POST' || !isInitializeRequest(body)) return deny(400, 'mcp-session-id required');
       if (sessions.size >= MAX) return deny(503, 'too many sessions');
       const s = buildServer(allowTools);
-      const t: any = new StreamableHTTPServerTransport({ sessionIdGenerator: () => crypto.randomUUID(),
+      const t: any = new StreamableHTTPServerTransport({ sessionIdGenerator: () => crypto.randomUUID(), enableJsonResponse: true,
         onsessioninitialized: (id: string) => { sessions.set(id, { t, s, sub: who.sub, last: Date.now() }); } });
       t.onclose = () => { if (t.sessionId) sessions.delete(t.sessionId); };
       await s.connect(t);
