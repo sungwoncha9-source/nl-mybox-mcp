@@ -17,6 +17,18 @@ import { isInitializeRequest } from '@modelcontextprotocol/sdk/types.js';
 import { createRemoteJWKSet, jwtVerify } from 'jose';
 
 const safeEq = (a: string, b: string) => { const x = Buffer.from(a), y = Buffer.from(b); return x.length === y.length && crypto.timingSafeEqual(x, y); };
+// b1/claimlog (시험 전용, 기본 꺼짐): NL_CLAIMLOG=1 이고 NL_CLAIMLOG_KEY(16자 이상)가 있을 때만 검증한 클레임의 최소 진단을 stderr 한 줄로 남긴다.
+// 남기는 것: 서버 키 HMAC 앞 12자(sub·azp·client_id 가명, 같은 값이면 같은 가명), aud 일치 여부·개수, scope 보유 여부, gty, MCP 메서드/도구 이름.
+// 남기지 않는 것: 출입증 전문, 헤더, 원래 sub·azp·client_id 값, 요청 본문.
+const CLAIMLOG = process.env.NL_CLAIMLOG === '1' && (process.env.NL_CLAIMLOG_KEY || '').length >= 16;
+const hmac12 = (v: string) => crypto.createHmac('sha256', process.env.NL_CLAIMLOG_KEY || 'x').update(v).digest('hex').slice(0, 12);
+const claimLog = (who: any, req: http.IncomingMessage, path: string, body: any) => {
+  if (!CLAIMLOG || !who || !who.diag) return;
+  const sid = String(req.headers['mcp-session-id'] || '');
+  const m = body && typeof body === 'object' ? String(body.method || '').slice(0, 40) : '';
+  const tool = m === 'tools/call' && body.params ? String(body.params.name || '').slice(0, 40) : '';
+  console.error('CLAIMLOG ' + JSON.stringify({ t: new Date().toISOString(), http: req.method, path: path.slice(0, 40), mcp: m || null, tool: tool || null, sess: sid ? hmac12(sid) : null, ...who.diag }));
+};
 const LOOP = ['127.0.0.1', 'localhost', '[::1]', '::1'];
 const isLoopUrl = (u: URL) => LOOP.includes(u.hostname);
 const list = (v: string | undefined) => (v || '').split(',').map(x => x.trim()).filter(Boolean);
@@ -35,7 +47,7 @@ async function restRoute(req: http.IncomingMessage, res: http.ServerResponse, bo
   try { send(200, await fn()); } catch (e: any) { const msg = String(e && e.message || e).slice(0, 300); send(msg.startsWith('not_allowed') ? 403 : /^API Error: (\d+)/.test(msg) ? 502 : 400, { error: msg }); }
 }
 
-type Who = { sub: string };
+type Who = { sub: string; diag?: any };
 type Auth = { mode: 'token' | 'oauth'; check: (h: string) => Promise<Who | { status: number; error: string; desc?: string }>; challenge: (err?: string) => string; metadata?: any };
 
 function makeAuth(): Auth {
@@ -71,7 +83,12 @@ function makeAuth(): Auth {
       catch (e: any) { return { status: 401, error: 'invalid_token', desc: String(e && e.code || 'invalid') }; }
       if (scope) { const have = String(payload.scope || '').split(' ').concat(Array.isArray(payload.permissions) ? payload.permissions : []); if (!have.includes(scope)) return { status: 403, error: 'insufficient_scope' }; }
       if (!subs.includes(String(payload.sub))) return { status: 403, error: 'forbidden_user' };
-      return { sub: String(payload.sub) };
+      const pseudo = (v: any) => (v === undefined || v === null || v === '') ? null : hmac12(String(v));
+      const aud = Array.isArray(payload.aud) ? payload.aud : (payload.aud === undefined ? [] : [payload.aud]);
+      const diag = { sub: pseudo(payload.sub), azp: pseudo(payload.azp), client_id: pseudo(payload.client_id), gty: payload.gty ? String(payload.gty).slice(0, 24) : null,
+        aud_ok: aud.includes(resource), aud_n: aud.length, scope_has: !!scope && String(payload.scope || '').split(' ').concat(Array.isArray(payload.permissions) ? payload.permissions : []).includes(scope),
+        scope_n: String(payload.scope || '').split(' ').filter(Boolean).length };
+      return { sub: String(payload.sub), diag };
     } };
 }
 
@@ -110,6 +127,7 @@ export async function runHttp(buildServer: (allow: Set<string>) => any, core?: a
       if (!('sub' in who)) { res.setHeader('www-authenticate', auth.challenge(who.error === 'unauthorized' ? undefined : who.error)); return deny(who.status, who.error); }
       let body: any = undefined;
       if (req.method === 'POST') { const chunks: Buffer[] = []; let n = 0; for await (const c of req) { n += (c as Buffer).length; if (n > 4 * 1024 * 1024) return deny(413, 'too large'); chunks.push(c as Buffer); } try { body = JSON.parse(Buffer.concat(chunks).toString('utf8')); } catch { return deny(400, 'bad json'); } }
+      claimLog(who, req, path, body);
       if (path.startsWith('/api/v1/')) return await restRoute(req, res, body, core, allowTools);
       const sid = String(req.headers['mcp-session-id'] || '');
       if (sid) {
@@ -133,6 +151,7 @@ export async function runHttp(buildServer: (allow: Set<string>) => any, core?: a
   });
   srv.on('close', () => { clearInterval(sweep); for (const id of [...sessions.keys()]) closeSession(id); });
   await new Promise<void>(r => srv.listen(port, host, r));
+  if (CLAIMLOG) console.error('CLAIMLOG 켜짐 (시험 전용, 가명만 기록)'); else if (process.env.NL_CLAIMLOG === '1') console.error('CLAIMLOG 요청됐으나 NL_CLAIMLOG_KEY(16자 이상)가 없어 꺼짐');
   const a: any = srv.address(); console.error('MYBOX MCP HTTP listening on http://' + host + ':' + a.port + '/mcp (인증: ' + auth.mode + ', 도구: ' + [...allowTools].join(',') + ')');
   return srv;
 }
