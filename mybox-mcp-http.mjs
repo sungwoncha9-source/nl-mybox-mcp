@@ -44421,6 +44421,10 @@ async function runHttp(buildServer2, core2) {
       }
       claimLog(who, req, path3, body);
       if (path3.startsWith("/api/v1/")) return await restRoute(req, res, body, core2, allowTools);
+      if (req.method === "GET") {
+        res.setHeader("allow", "POST, DELETE, OPTIONS");
+        return deny2(405, "method not allowed");
+      }
       const sid = String(req.headers["mcp-session-id"] || "");
       if (sid) {
         const e = sessions.get(sid);
@@ -44436,6 +44440,7 @@ async function runHttp(buildServer2, core2) {
       const s = buildServer2(allowTools);
       const t = new StreamableHTTPServerTransport({
         sessionIdGenerator: () => crypto4.randomUUID(),
+        enableJsonResponse: true,
         onsessioninitialized: (id) => {
           sessions.set(id, { t, s, sub: who.sub, last: Date.now() });
         }

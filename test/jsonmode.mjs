@@ -1,0 +1,27 @@
+// w1/json-response 시험: POST 응답이 JSON 한 번에 오고(SSE 아님), GET /mcp는 405, SDK 클라이언트로 도구 호출이 되는지. 가짜 인증 서버·가짜 MYBOX만 씀.
+import http from 'node:http'; import fs from 'node:fs'; import path from 'node:path'; import os from 'node:os'; import { spawn } from 'node:child_process';
+import { Client } from '@modelcontextprotocol/sdk/client/index.js';
+import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
+import { generateKeyPair, exportJWK, SignJWT } from 'jose';
+const HTTPB = process.argv[2]; const JOBS = fs.mkdtempSync(path.join(os.tmpdir(), 'jm-'));
+let pass = 0, fail = 0; const ok = (c, m) => { (c ? pass++ : fail++); console.log((c ? '  OK   ' : '  FAIL ') + m); };
+const mb = http.createServer((q, s) => { s.setHeader('content-type', 'application/json'); s.end('{}'); }); await new Promise(r => mb.listen(0, '127.0.0.1', r)); const MB = 'http://127.0.0.1:' + mb.address().port + '/v1';
+const { publicKey, privateKey } = await generateKeyPair('RS256'); const jwk = { ...(await exportJWK(publicKey)), kid: 'k1', alg: 'RS256', use: 'sig' };
+const as = http.createServer((q, s) => { if (q.url === '/.well-known/jwks.json') { s.setHeader('content-type', 'application/json'); return s.end(JSON.stringify({ keys: [jwk] })); } s.statusCode = 404; s.end(); });
+await new Promise(r => as.listen(0, '127.0.0.1', r)); const ISS = 'http://127.0.0.1:' + as.address().port + '/'; const AUD = 'http://127.0.0.1/mcp'; const SUB = 'auth0|boss';
+const tok = await new SignJWT({ scope: 'openid' }).setProtectedHeader({ alg: 'RS256', kid: 'k1' }).setSubject(SUB).setIssuer(ISS).setAudience(AUD).setIssuedAt().setExpirationTime('10m').sign(privateKey);
+const S = await new Promise(resolve => { const p = spawn('node', [HTTPB], { env: { ...process.env, NL_TRANSPORT: 'http', NL_AUTH: 'oauth', NL_HTTP_PORT: '0', NL_PUBLIC_URL: 'http://127.0.0.1', NL_OAUTH_ISSUER: ISS, NL_OAUTH_AUDIENCE: AUD, NL_OAUTH_ALLOWED_SUBS: SUB, MYBOX_ACCESS_TOKEN: 'dummy', MYBOX_BASE_URL: MB, NL_JOBS_DIR: JOBS, NL_JOB_ALLOWED_PARENTS: 'tree:ALLOW' } });
+  let err = ''; p.stderr.on('data', d => { err += d; const m = err.match(/listening on http:\/\/[^:]+:(\d+)\/mcp/); if (m) resolve({ p, port: +m[1] }); }); });
+const raw = (method, body, headers = {}) => new Promise(resolve => { const data = body ? Buffer.from(JSON.stringify(body)) : null; const r = http.request({ host: '127.0.0.1', port: S.port, path: '/mcp', method, headers: { 'content-type': 'application/json', accept: 'application/json, text/event-stream', authorization: 'Bearer ' + tok, ...(data ? { 'content-length': data.length } : {}), ...headers } }, res => { const c = []; res.on('data', d => c.push(d)); res.on('end', () => resolve({ status: res.statusCode, h: res.headers, raw: Buffer.concat(c).toString() })); }); if (data) r.write(data); r.end(); });
+const init = { jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 't', version: '1' } } };
+const i = await raw('POST', init); const sid = i.h['mcp-session-id'];
+ok(i.status === 200 && /application\/json/.test(i.h['content-type'] || '') && !/text\/event-stream/.test(i.h['content-type'] || ''), '[J1] 초기화 응답이 JSON 한 번에 옴 (' + i.h['content-type'] + ')');
+ok(/"protocolVersion"/.test(i.raw) && !/^event:/m.test(i.raw), '[J1b] 본문이 SSE 줄(event:) 없이 JSON');
+const g = await raw('GET', null, sid ? { 'mcp-session-id': sid } : {}); ok(g.status === 405 && /POST/.test(g.h.allow || ''), '[J2] GET /mcp → 405 + Allow (' + g.status + ')');
+const g0 = await raw('GET', null, { authorization: 'Bearer x'.padEnd(30, 'x') }); ok(g0.status === 401, '[J2b] 출입증 없는 GET은 405가 아니라 401 먼저 (' + g0.status + ')');
+const c = new Client({ name: 'sdk', version: '1' }); await c.connect(new StreamableHTTPClientTransport(new URL('http://127.0.0.1:' + S.port + '/mcp'), { requestInit: { headers: { authorization: 'Bearer ' + tok } } }));
+const tools = await c.listTools(); ok(tools.tools.map(t => t.name).sort().join(',') === 'job_put_chunk,job_status', '[J3] SDK 클라이언트로 연결·도구 목록 (job_put_chunk, job_status)');
+const r = await c.callTool({ name: 'job_status', arguments: { job_id: 'nope' } }); ok(/unknown/.test(JSON.stringify(r)), '[J4] job_status 호출 → unknown (쓰기 0)');
+await Promise.all([1, 2, 3, 4, 5].map(n => c.callTool({ name: 'job_status', arguments: { job_id: 'n' + n } }))).then(x => ok(x.length === 5, '[J5] 동시 5회 호출 성공'));
+const d = await raw('DELETE', null, { 'mcp-session-id': sid }); ok(d.status === 200 || d.status === 204, '[J6] 세션 DELETE 정상 (' + d.status + ')');
+await c.close(); S.p.kill(); console.log('\n통과 ' + pass + ' / 실패 ' + fail); as.close(); mb.close(); process.exit(fail ? 1 : 0);
