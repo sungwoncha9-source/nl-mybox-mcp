@@ -37,7 +37,8 @@ export async function runSelfTest({ fakePort, bundles, tmp, log, childEnv, guard
       // C4 접수 뒤 올리기 전 이동 경쟁
       await ctl('reset'); await ctl('arm', { id: 'SUB', parent: 'OUT', after: 1 }); const jid = id(); a = await q('POST', '/api/v1/jobs/chunk', job(jid, 'SUB'));
       for (let i = 0; i < 20 && !(a.json && /done|failed/.test(a.json.state || '')); i++) { await sleep(500); a = await q('GET', '/api/v1/jobs/' + jid); }
-      s1 = await stats(); R.c4_race_after_accept = { state: a.json && a.json.state, uploads: s1.uploads, tree_SUB: s1.tree.SUB, pass: s1.uploads === 0, expect: 'uploads=0' };
+      s1 = await stats(); const c4state = a.json && a.json.state; const c4resolved = /^(done|failed)$/.test(c4state || '');
+      R.c4_race_after_accept = { state: c4state, resolved: c4resolved, uploads: s1.uploads, tree_SUB: s1.tree.SUB, pass: c4resolved && c4state === 'failed' && s1.uploads === 0, expect: 'state=failed(끝까지 처리됨), uploads=0' };
       // P1 비용: 일감 한 건당 가짜 MYBOX 폴더 조회 수, 시간
       await ctl('reset'); const cost = {};
       for (const [k, pid] of [['depth2_SUB', 'SUB'], ['depth6_D5', 'D5']]) { s0 = await stats(); const t0 = Date.now(); const r = await q('POST', '/api/v1/jobs/chunk', job(id(), pid)); const ms = Date.now() - t0; s1 = await stats(); cost[k] = { status: r.status, state: r.json && r.json.state, resource_reads: s1.resGets - s0.resGets, ms }; }
@@ -53,4 +54,31 @@ export async function runSelfTest({ fakePort, bundles, tmp, log, childEnv, guard
   try { childEnv({}, 'https://open-api.mybox.naver.com/v1', {}); out.guard.nonloopback_throws = false; } catch { out.guard.nonloopback_throws = true; }
   log('SELFTEST guard ' + JSON.stringify(out.guard));
   return out;
+}
+
+// 전체 판정: 개별 항목의 pass 를 하나로 합친다. 예외 없이 끝났다는 사실(이전의 'selftest-done')은 합격이 아니다.
+// 1) 수정 번들(fixed)의 c1~c4 가 모두 통과, 2) 기준 번들(baseline)은 같은 c1~c4 를 모두 실패(결함을 잡는 시험이라는 대조),
+// 3) 시험 도중 오류(error)가 없음, 4) 관측 항목(p1·r1)이 실제로 관측됨, 5) 시작 가드 다섯 항목이 모두 기대대로.
+// c4 는 기록된 pass 를 믿지 않고 원자료(끝까지 처리됨·상태 failed·업로드 0)로 다시 판정한다.
+export const CHECKS = ['c1_move_out_then_create', 'c2_deny_then_allow', 'c3_allow_then_move_out', 'c4_race_after_accept'];
+export function judge(out) {
+  const why = []; const o = out || {};
+  const c4ok = c => !!c && c.resolved === true && c.state === 'failed' && c.uploads === 0;
+  const fx = o.fixed, bl = o.baseline;
+  if (!fx) why.push('fixed(수정 번들) 결과 없음');
+  else {
+    if (fx.error) why.push('fixed 시험 도중 오류: ' + String(fx.error).split('\n')[0]);
+    for (const k of CHECKS) { const c = fx[k]; if (!c) why.push('fixed ' + k + ' 결과 없음'); else if (c.pass !== true) why.push('fixed ' + k + ' 불합격'); }
+    if (fx.c4_race_after_accept && !c4ok(fx.c4_race_after_accept)) why.push('fixed c4 원자료가 합격 조건(끝까지 처리·failed·업로드 0)이 아님');
+    const p = fx.p1_cost_per_job; if (!p || !p.depth2_SUB || !p.depth6_D5 || p.depth2_SUB.status !== 200 || p.depth6_D5.status !== 200) why.push('fixed p1 관측 누락 또는 비정상');
+    const r = fx.r1_restart; if (!r || r.status_after_restart !== 200 || !r.new_job_after_restart) why.push('fixed r1 재시작 관측 누락 또는 비정상');
+  }
+  if (!bl) why.push('baseline(기준 번들) 결과 없음');
+  else {
+    if (bl.error) why.push('baseline 시험 도중 오류: ' + String(bl.error).split('\n')[0]);
+    for (const k of CHECKS) { const c = bl[k]; if (!c) why.push('baseline ' + k + ' 결과 없음'); else if (c.pass !== false) why.push('baseline ' + k + ' 가 통과함: 결함을 못 잡는 시험(대조 실패)'); }
+  }
+  const g = o.guard; const want = { refuses_real_token: true, refuses_base_url: true, refuses_oauth_copy: true, clean_env_ok: true, nonloopback_throws: true };
+  if (!g) why.push('guard 결과 없음'); else for (const [k, v] of Object.entries(want)) if (g[k] !== v) why.push('guard ' + k + ' 기대 ' + v + ' 실제 ' + g[k]);
+  return { verdict: why.length ? 'FAIL' : 'PASS', reasons: why };
 }

@@ -1,7 +1,7 @@
 // S3 시작 파일: 가짜 MYBOX(루프백) + MCP HTTP 서버(기준/수정 두 번들)를 같은 컨테이너에서 띄우고 자체 시험을 돌린다.
 // fail-closed: 실제 MYBOX 주소·토큰이 섞이면 시작하지 않는다. 자식 프로세스 환경은 허용 목록으로만 만든다(S1 비밀값이 와도 전달 안 됨).
 import http from 'node:http'; import fs from 'node:fs'; import os from 'node:os'; import path from 'node:path'; import { fileURLToPath } from 'node:url';
-import { startFake } from './fake-mybox.mjs'; import { runSelfTest } from './selftest.mjs';
+import { startFake } from './fake-mybox.mjs'; import { runSelfTest, judge } from './selftest.mjs';
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 export function guardEnv(env) {
   const bad = [];
@@ -23,7 +23,7 @@ if (isMain) {
   const PORT = +process.env.PORT || 3000;
   http.createServer((q, r) => { r.setHeader('content-type', 'application/json; charset=utf-8'); r.end(JSON.stringify(q.url.startsWith('/selftest.json') ? results : { service: 'S3 시험(합성)', see: '/selftest.json' }, null, 1)); }).listen(PORT, '0.0.0.0', () => console.log('S3 status on :' + PORT));
   const root = path.resolve(HERE, '..');
-  try { results.checks = await runSelfTest({ fakePort: fake.port, bundles: { baseline: path.join(HERE, 'baseline-http.mjs'), fixed: path.join(root, 'mybox-mcp-http.mjs') }, tmp: fs.mkdtempSync(path.join(os.tmpdir(), 's3-')), log: (...a) => console.log(...a), childEnv, guardEnv }); results.status = 'selftest-done'; }
+  try { results.checks = await runSelfTest({ fakePort: fake.port, bundles: { baseline: path.join(HERE, 'baseline-http.mjs'), fixed: path.join(root, 'mybox-mcp-http.mjs') }, tmp: fs.mkdtempSync(path.join(os.tmpdir(), 's3-')), log: (...a) => console.log(...a), childEnv, guardEnv }); const v = judge(results.checks); results.verdict = v.verdict; results.reasons = v.reasons; results.status = v.verdict === 'PASS' ? 'selftest-pass' : 'selftest-fail'; }
   catch (e) { results.status = 'selftest-error'; results.error = String(e && e.stack || e).slice(0, 2000); console.error(results.error); }
   console.log('SELFTEST_RESULT ' + JSON.stringify(results));
 }
