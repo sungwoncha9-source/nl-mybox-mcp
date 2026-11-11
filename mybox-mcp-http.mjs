@@ -41119,7 +41119,7 @@ var require_follow_redirects = __commonJS({
       return URL2 && value instanceof URL2;
     }
     function escapeRegex2(regex) {
-      return regex.replace(/[[\]\\/()*+?.^$|]/g, "\\$&");
+      return regex.replace(/[\^$\\.*+?()[\]{}|]/g, "\\$&");
     }
     module.exports = wrap({ http: http4, https: https2 });
     module.exports.wrap = wrap;
@@ -43998,6 +43998,8 @@ function validateClaimsSet(protectedHeader, claimsSetBytes, options = {}) {
     throw new JWTExpired('"exp" claim timestamp check failed', claimsSet, "exp", checkFailed);
   if (maxTokenAge !== void 0) {
     const age = now - iat, max = validateInput("maxTokenAge option", typeof maxTokenAge == "number" ? maxTokenAge : secs(maxTokenAge));
+    if (max < 0)
+      throw new TypeError("Invalid maxTokenAge option input");
     if (age - tolerance > max)
       throw new JWTExpired('"iat" claim timestamp check failed (too far in the past)', claimsSet, "iat", checkFailed);
     if (age < -tolerance)
@@ -44207,7 +44209,7 @@ var init_remote = __esm({
     init_errors3();
     init_local();
     init_validate();
-    (typeof navigator > "u" || !navigator.userAgent?.startsWith?.("Mozilla/5.0 ")) && (USER_AGENT = "jose/v6.2.15");
+    (typeof navigator > "u" || !navigator.userAgent?.startsWith?.("Mozilla/5.0 ")) && (USER_AGENT = "jose/v6.2.17");
     customFetch = /* @__PURE__ */ Symbol();
     jwksCache = /* @__PURE__ */ Symbol();
   }
@@ -44249,6 +44251,10 @@ async function restRoute(req, res, body, core2, allow) {
     const id = m[1], k = m[2];
     tool = k === "copy" ? "files_copy" : "files_move";
     fn = () => core2[k](id, body || {});
+  } else if (req.method === "GET" && (m = p.match(/^\/api\/v1\/resources\/([^/]+)\/download$/))) {
+    tool = "files_download";
+    const id = m[1];
+    fn = () => core2.download(id);
   } else if (req.method === "POST" && p === "/api/v1/jobs/chunk") {
     tool = "job_put_chunk";
     fn = () => core2.putChunk(body || {});
@@ -54751,7 +54757,7 @@ import { resolve as resolvePath } from "path";
 import zlib from "zlib";
 
 // node_modules/axios/lib/env/data.js
-var VERSION = "1.21.0";
+var VERSION = "1.21.1";
 
 // node_modules/axios/lib/helpers/parseProtocol.js
 function parseProtocol(url3) {
@@ -58252,8 +58258,11 @@ function throwIfCancellationRequested(config2) {
     throw new CanceledError_default(null, config2);
   }
 }
-function elapsedSince(start) {
-  return Math.max(0, Date.now() - start);
+function resolveClock() {
+  return typeof performance !== "undefined" && utils_default.isFunction(performance.now) ? () => performance.now() : Date.now;
+}
+function elapsedSince(now, start) {
+  return Math.max(0, Math.round(now() - start));
 }
 function dispatchRequest(_config) {
   const config2 = utils_default.toSafeFlatObject(_config);
@@ -58264,11 +58273,12 @@ function dispatchRequest(_config) {
     config2.headers.setContentType("application/x-www-form-urlencoded", false);
   }
   const adapter2 = adapters_default.getAdapter(config2.adapter || defaults_default.adapter, config2);
-  const start = Date.now();
+  const now = resolveClock();
+  const start = now();
   return adapter2(config2).then(
     function onAdapterResolution(response) {
       throwIfCancellationRequested(config2);
-      response.duration = elapsedSince(start);
+      response.duration = elapsedSince(now, start);
       config2.response = response;
       try {
         response.data = transformData.call(config2, config2.transformResponse, response);
@@ -58282,7 +58292,7 @@ function dispatchRequest(_config) {
       if (!isCancel(reason)) {
         throwIfCancellationRequested(config2);
         if (reason && reason.response) {
-          reason.response.duration = elapsedSince(start);
+          reason.response.duration = elapsedSince(now, start);
           config2.response = reason.response;
           try {
             reason.response.data = transformData.call(
@@ -59458,7 +59468,7 @@ async function uploadEntries(st, uploader, edir) {
 
 // src/index.ts
 var GUARD = process.env.NL_TRANSPORT === "http" || process.env.NL_TOOL_GUARD === "1";
-var GUARDED_TOOLS = ["job_put_chunk", "job_status", "dms_list", "files_copy", "files_move", "files_create_folder"];
+var GUARDED_TOOLS = ["job_put_chunk", "job_status", "dms_list", "files_copy", "files_move", "files_create_folder", "dms_resourceId", "search_files_resources", "search_folders_resources", "files_download", "files_read_image"];
 var RID_RE = /^[A-Za-z0-9+=_-]{1,300}$/;
 var deny = (m) => {
   throw new Error("not_allowed: " + m);
@@ -59490,7 +59500,7 @@ async function insideAllowed(id, what) {
   if (!p) deny(what + " \uC0C1\uC704 \uD3F4\uB354\uAC00 \uC5C6\uC2B5\uB2C8\uB2E4");
   await folderAllowed(p, what + "\uC758 \uC0C1\uC704 \uD3F4\uB354");
 }
-var VERSION3 = "1.10.0";
+var VERSION3 = "1.12.0";
 var TOOL_DEFS = [];
 var server = { tool: (...a) => {
   TOOL_DEFS.push(a);
@@ -59549,7 +59559,7 @@ server.tool(
   { resourceId: idParam("\uC870\uD68C\uD560 \uD3F4\uB354\uC758 ID"), ...paging },
   async ({ resourceId, ...params }) => out(await core.list(resourceId, params))
 );
-server.tool("dms_resourceId", "\uAC1C\uBCC4 \uD30C\uC77C/\uD3F4\uB354 \uC18D\uC131 \uC870\uD68C", { resourceId: idParam("\uD30C\uC77C/\uD3F4\uB354 ID") }, async (args) => out(await makeRequest("GET", `/drive/resources/${args.resourceId}`)));
+server.tool("dms_resourceId", "\uAC1C\uBCC4 \uD30C\uC77C/\uD3F4\uB354 \uC18D\uC131 \uC870\uD68C", { resourceId: idParam("\uD30C\uC77C/\uD3F4\uB354 ID") }, async (args) => out(await core.resource(args.resourceId)));
 server.tool("files_create_folder", "\uD3F4\uB354 \uC0DD\uC131", {
   folderName: external_exports.string().describe("\uC0DD\uC131\uD560 \uD3F4\uB354 \uC774\uB984"),
   parentId: external_exports.string().optional().describe("\uC0C1\uC704 \uD3F4\uB354 ID(\uC0DD\uB7B5 \uC2DC \uB8E8\uD2B8)")
@@ -59565,7 +59575,10 @@ server.tool("files_upload", "\uD30C\uC77C \uC5C5\uB85C\uB4DC URL \uC0DD\uC131 (P
 }, async (args) => out(await makeRequest("POST", "/drive/files", args)));
 server.tool("files_download", "\uD30C\uC77C \uB2E4\uC6B4\uB85C\uB4DC URL \uC0DD\uC131 (PC \uD3F4\uB354\uB85C \uBC14\uB85C \uBC1B\uC73C\uB824\uBA74 files_download_to_path)", {
   resourceId: idParam("\uD30C\uC77C ID")
-}, async (args) => out(await makeRequest("GET", `/drive/files/${args.resourceId}/download`)));
+}, async (args) => out(await core.download(args.resourceId)));
+server.tool("files_read_image", "\uD5C8\uC6A9 \uD3F4\uB354 \uC548 \uADF8\uB9BC \uD30C\uC77C(JPG\xB7PNG\xB7GIF\xB7WEBP) \uB0B4\uC6A9 \uC77D\uAE30 (\uD06C\uAE30 \uC0C1\uD55C NL_READ_MAX_BYTES, \uAE30\uBCF8 3MB)", {
+  resourceId: idParam("\uADF8\uB9BC \uD30C\uC77C ID")
+}, async (args) => core.readImage(args.resourceId));
 server.tool("files_copy", "\uD30C\uC77C/\uD3F4\uB354 \uBCF5\uC0AC", {
   resourceId: idParam("\uC6D0\uBCF8 ID"),
   parentId: external_exports.string().optional().describe("\uBCF5\uC0AC\uBCF8\uC744 \uB458 \uD3F4\uB354 ID(\uC0DD\uB7B5 \uC2DC \uB8E8\uD2B8)"),
@@ -59595,7 +59608,7 @@ server.tool("search_files_resources", "\uD30C\uC77C \uAC80\uC0C9 (q\xB7category\
   parentPath: external_exports.string().optional().describe("\uC774 \uD3F4\uB354 \uC544\uB798\uC5D0\uC11C\uB9CC \uAC80\uC0C9"),
   count: external_exports.number().optional().describe("20~200"),
   cursor: external_exports.string().optional()
-}, async (args) => out(await makeRequest("GET", "/search/resources/files", void 0, args)));
+}, async (args) => out(await core.searchFiles(args)));
 server.tool("search_folders_resources", "\uD3F4\uB354 \uAC80\uC0C9 (q\xB7path\xB7startDate/endDate \uC911 \uD558\uB098 \uC774\uC0C1 \uD544\uC694)", {
   q: external_exports.string().optional(),
   path: external_exports.string().optional().describe("\uC9C0\uC815\uD55C \uD3F4\uB354 \uC548\uC5D0\uC11C\uB9CC \uAC80\uC0C9(\uB2E4\uB978 \uC870\uAC74 \uBB34\uC2DC)"),
@@ -59605,7 +59618,7 @@ server.tool("search_folders_resources", "\uD3F4\uB354 \uAC80\uC0C9 (q\xB7path\xB
   parentPath: external_exports.string().optional(),
   count: external_exports.number().optional().describe("20~200"),
   cursor: external_exports.string().optional()
-}, async (args) => out(await makeRequest("GET", "/search/resources/folders", void 0, args)));
+}, async (args) => out(await core.searchFolders(args)));
 server.tool("dms_trash_list", "\uD734\uC9C0\uD1B5 \uBAA9\uB85D \uC870\uD68C", paging, async (args) => out(await makeRequest("GET", "/drive/trash", void 0, args)));
 server.tool("files_trash_restore", "\uD734\uC9C0\uD1B5 \uD30C\uC77C/\uD3F4\uB354 \uBCF5\uC6D0(\uC6D0\uB798 \uC704\uCE58)", {
   resourceId: idParam("ID"),
@@ -59782,7 +59795,108 @@ var pick2 = (o, keys) => {
   for (const k of keys) if (o && o[k] !== void 0) r[k] = o[k];
   return r;
 };
+async function guardedSearch(endpoint, args) {
+  const res = await makeRequest("GET", endpoint, void 0, args);
+  if (!GUARD) return res;
+  if (res == null || typeof res !== "object") deny("\uAC80\uC0C9 \uC751\uB2F5 \uBAA8\uC591\uC774 \uC608\uC0C1\uACFC \uB2E4\uB985\uB2C8\uB2E4");
+  const items = Array.isArray(res.resources) ? res.resources : [];
+  const cache2 = /* @__PURE__ */ new Map();
+  const keep = [];
+  let dropped = 0;
+  for (const it of items) {
+    try {
+      await checkAllowed(it && typeof it.parentId === "string" && RID_RE.test(it.parentId) ? it.parentId : void 0, jobUploader, cache2);
+      keep.push(it);
+    } catch {
+      dropped++;
+    }
+  }
+  return { ...res, resources: keep, filteredOut: dropped };
+}
+var IMG_SIG = [["image/jpeg", [255, 216, 255]], ["image/png", [137, 80, 78, 71]], ["image/gif", [71, 73, 70, 56]]];
+function sniffImage(b) {
+  for (const [m, sig2] of IMG_SIG) if (sig2.every((v, i) => b[i] === v)) return m;
+  if (b.length > 12 && b.subarray(0, 4).toString("latin1") === "RIFF" && b.subarray(8, 12).toString("latin1") === "WEBP") return "image/webp";
+  return null;
+}
+async function readImage(resourceId) {
+  const maxBytes = Math.max(1024, Math.min(Number(process.env.NL_READ_MAX_BYTES) || 3e6, 8e6));
+  const prefixes = (process.env.NL_READ_URL_PREFIXES || "https://open-api-fs.mybox.naver.com/").split(",").map((x) => x.trim()).filter(Boolean);
+  const fail = (reason, host) => ({ isError: true, content: [{ type: "text", text: JSON.stringify(host ? { ok: false, reason, host } : { ok: false, reason }) }] });
+  const hostOf = (u) => {
+    try {
+      return new URL(u).hostname.slice(0, 80);
+    } catch {
+      return "?";
+    }
+  };
+  if (GUARD) await insideAllowed(resourceId, "\uADF8\uB9BC \uC77D\uAE30 \uB300\uC0C1");
+  const meta3 = await makeRequest("GET", `/drive/resources/${resourceId}`);
+  if (typeof meta3?.size === "number" && meta3.size > maxBytes) return fail("too_large: " + meta3.size + " > " + maxBytes);
+  const d = await makeRequest("GET", `/drive/files/${resourceId}/download`);
+  const url3 = d && typeof d.downloadUrl === "string" ? d.downloadUrl : "";
+  if (!url3 || !prefixes.some((p) => url3.startsWith(p))) return fail("url_not_allowed", url3 ? hostOf(url3) : void 0);
+  const ctl = new AbortController();
+  const timer = setTimeout(() => ctl.abort(), Math.max(200, Number(process.env.NL_READ_TIMEOUT_MS) || 2e4));
+  try {
+    let cur = url3;
+    let r = null;
+    for (let hop = 0; hop < 4; hop++) {
+      r = await fetch(cur, { signal: ctl.signal, redirect: "manual" });
+      if (r.status >= 300 && r.status < 400) {
+        const loc = r.headers.get("location");
+        let nx = "";
+        try {
+          nx = loc ? new URL(loc, cur).toString() : "";
+        } catch {
+          nx = "";
+        }
+        if (!nx || !prefixes.some((p) => nx.startsWith(p))) return fail("redirect_not_allowed", nx ? hostOf(nx) : void 0);
+        cur = nx;
+        r = null;
+        continue;
+      }
+      break;
+    }
+    if (!r) return fail("too_many_redirects");
+    if (!r.ok || !r.body) return fail("download_http_" + r.status);
+    const len = Number(r.headers.get("content-length"));
+    if (len && len > maxBytes) return fail("too_large: " + len + " > " + maxBytes);
+    const chunks = [];
+    let got = 0;
+    let over = false;
+    for await (const c of r.body) {
+      got += c.length;
+      if (got > maxBytes) {
+        over = true;
+        break;
+      }
+      chunks.push(Buffer.from(c));
+    }
+    if (over) return fail("too_large: >" + maxBytes);
+    const buf = Buffer.concat(chunks);
+    const mime = sniffImage(buf);
+    if (!mime) return fail("not_image");
+    return { content: [
+      { type: "text", text: JSON.stringify({ ok: true, resourceId, name: meta3?.name, bytes: buf.length, mimeType: mime }) },
+      { type: "image", data: buf.toString("base64"), mimeType: mime }
+    ] };
+  } catch (e) {
+    return fail("download_failed: " + String(e?.name === "AbortError" ? "timeout_or_abort" : e?.message).slice(0, 80));
+  } finally {
+    clearTimeout(timer);
+  }
+}
 var core = {
+  resource: async (resourceId) => {
+    if (GUARD) {
+      const r = rid(resourceId, "\uB300\uC0C1");
+      if (!allowRoots().includes(r)) await insideAllowed(r, "\uB300\uC0C1");
+    }
+    return makeRequest("GET", `/drive/resources/${resourceId}`);
+  },
+  searchFiles: (args) => guardedSearch("/search/resources/files", args),
+  searchFolders: (args) => guardedSearch("/search/resources/folders", args),
   list: async (resourceId, params = {}) => {
     if (GUARD) await folderAllowed(resourceId, "\uC870\uD68C \uD3F4\uB354");
     return makeRequest("GET", `/drive/folders/${resourceId}/resources`, void 0, pick2(params, ["sort", "count", "cursor"]));
@@ -59806,6 +59920,11 @@ var core = {
     }
     return makeRequest("POST", `/drive/resources/${resourceId}/move`, pick2(body, ["parentId", "isOverwrite"]));
   },
+  download: async (resourceId) => {
+    if (GUARD) await insideAllowed(resourceId, "\uB0B4\uB824\uBC1B\uAE30 \uB300\uC0C1");
+    return makeRequest("GET", `/drive/files/${resourceId}/download`);
+  },
+  readImage: async (resourceId) => readImage(resourceId),
   putChunk: (args) => putChunk(args, jobUploader),
   status: (jobId) => jobStatus(jobId)
 };

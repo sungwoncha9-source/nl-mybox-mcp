@@ -16,7 +16,8 @@ import { putChunk, jobStatus, checkAllowed, type Uploader } from './jobs.js';
 // 켜지면: ① 허용 목록(NL_JOB_ALLOWED_PARENTS)이 비면 시작하지 않는다 ② ID 모양을 먼저 본다(경로 조작 차단)
 // ③ 목록·폴더 만들기·복사·이동은 출발지와 목적지가 모두 허용 범위 안이어야 한다 ④ 허용 폴더 자체는 옮기거나 복사하지 않는다
 const GUARD = process.env.NL_TRANSPORT === 'http' || process.env.NL_TOOL_GUARD === '1';
-export const GUARDED_TOOLS = ['job_put_chunk', 'job_status', 'dms_list', 'files_copy', 'files_move', 'files_create_folder'];
+// 1.11.0(S4 읽기 전용 시험): 읽기 도구 3개(dms_resourceId, 검색 둘)에도 지킴이를 붙여 HTTP로 열 수 있게 함. 쓰기 도구는 늘리지 않는다.
+export const GUARDED_TOOLS = ['job_put_chunk', 'job_status', 'dms_list', 'files_copy', 'files_move', 'files_create_folder', 'dms_resourceId', 'search_files_resources', 'search_folders_resources', 'files_download', 'files_read_image'];
 const RID_RE = /^[A-Za-z0-9+=_-]{1,300}$/;
 const deny = (m: string) => { throw new Error('not_allowed: ' + m); };
 function rid(v: unknown, what: string): string { if (typeof v !== 'string' || !RID_RE.test(v)) deny(what + ' 형식이 올바르지 않습니다'); return v as string; }
@@ -36,7 +37,7 @@ async function insideAllowed(id: unknown, what: string) {
 declare const __HTTP__: boolean;   // 빌드 때 정해진다: stdio 번들 false(HTTP 코드 제거) / http 번들 true
 // 1.10.0 시험: 도구 정의를 한 번만 적어 두고, 연결(세션)마다 새 서버를 만들어 같은 도구를 붙인다.
 // 이유(A, 11-07 격리 시험): 서버 하나에 연결 하나뿐이라 두 번째 클라이언트가 "Server already initialized"로 거절됐다.
-export const VERSION = '1.10.0';
+export const VERSION = '1.12.0';
 const TOOL_DEFS: any[][] = [];
 const server = { tool: (...a: any[]) => { TOOL_DEFS.push(a); } };
 export function buildServer(allow?: Set<string>) {
@@ -108,7 +109,7 @@ server.tool('dms_list', '특정 폴더 내 파일/폴더 목록 조회', { resou
 
 // 4
 server.tool('dms_resourceId', '개별 파일/폴더 속성 조회', { resourceId: idParam('파일/폴더 ID') }, async (args) =>
-  out(await makeRequest('GET', `/drive/resources/${args.resourceId}`)));
+  out(await core.resource(args.resourceId)));
 
 // 5
 server.tool('files_create_folder', '폴더 생성', {
@@ -130,7 +131,13 @@ server.tool('files_upload', '파일 업로드 URL 생성 (PC 파일을 바로 �
 // 7 다운로드 URL
 server.tool('files_download', '파일 다운로드 URL 생성 (PC 폴더로 바로 받으려면 files_download_to_path)', {
   resourceId: idParam('파일 ID')
-}, async (args) => out(await makeRequest('GET', `/drive/files/${args.resourceId}/download`)));
+}, async (args) => out(await core.download(args.resourceId)));
+
+// 7b (1.12.0) 그림 읽기: MYBOX 임시 주소를 서버가 직접 받아 그림 내용을 돌려준다. 읽기 전용.
+// 이유(A, 11-11): 임시 주소만 받으면 클라우드 대화창은 열 수 없다(작업 공간 네트워크 허용 목록 밖). 서버(NAS)가 대신 받아야 PC 없이 그림을 볼 수 있다.
+server.tool('files_read_image', '허용 폴더 안 그림 파일(JPG·PNG·GIF·WEBP) 내용 읽기 (크기 상한 NL_READ_MAX_BYTES, 기본 3MB)', {
+  resourceId: idParam('그림 파일 ID')
+}, async (args) => core.readImage(args.resourceId));
 
 // 8 복사
 server.tool('files_copy', '파일/폴더 복사', {
@@ -174,7 +181,7 @@ server.tool('search_files_resources', '파일 검색 (q·category·startDate/end
   parentPath: z.string().optional().describe('이 폴더 아래에서만 검색'),
   count: z.number().optional().describe('20~200'),
   cursor: z.string().optional()
-}, async (args) => out(await makeRequest('GET', '/search/resources/files', undefined, args)));
+}, async (args) => out(await core.searchFiles(args)));
 
 // 15 폴더 검색
 server.tool('search_folders_resources', '폴더 검색 (q·path·startDate/endDate 중 하나 이상 필요)', {
@@ -186,7 +193,7 @@ server.tool('search_folders_resources', '폴더 검색 (q·path·startDate/endDa
   parentPath: z.string().optional(),
   count: z.number().optional().describe('20~200'),
   cursor: z.string().optional()
-}, async (args) => out(await makeRequest('GET', '/search/resources/folders', undefined, args)));
+}, async (args) => out(await core.searchFolders(args)));
 
 // 16~20 휴지통
 server.tool('dms_trash_list', '휴지통 목록 조회', paging, async (args) =>
@@ -346,7 +353,71 @@ server.tool('job_status', '일감의 진행·마무리 결과를 읽는다(읽�
 
 // ---- 1.9.3 시험: 반영 핵심(core) — MCP 문(도구)과 일반 HTTPS 문(/api/v1)이 같은 함수를 부른다 --------
 const pick = (o: any, keys: string[]) => { const r: any = {}; for (const k of keys) if (o && o[k] !== undefined) r[k] = o[k]; return r; };
+// 1.11.0: 검색 결과는 허용 범위 안의 것만 돌려준다(없는 것으로 취급). 결과마다 상위 폴더가 허용 범위 안인지 이번 호출 안에서만 판정(호출 사이 캐시 없음).
+// 판정 못 하면(상위 ID 없음·조회 실패) 빼는 쪽(fail-closed). 빠진 개수만 filteredOut으로 알린다.
+async function guardedSearch(endpoint: string, args: any) {
+  const res: any = await makeRequest('GET', endpoint, undefined, args);
+  if (!GUARD) return res;
+  if (res == null || typeof res !== 'object') deny('검색 응답 모양이 예상과 다릅니다');
+  const items: any[] = Array.isArray(res.resources) ? res.resources : [];
+  const cache = new Map<string, boolean>(); const keep: any[] = []; let dropped = 0;
+  for (const it of items) {
+    try { await checkAllowed(it && typeof it.parentId === 'string' && RID_RE.test(it.parentId) ? it.parentId : undefined, jobUploader, cache); keep.push(it); }
+    catch { dropped++; }
+  }
+  return { ...res, resources: keep, filteredOut: dropped };
+}
+// 1.12.0: 그림 읽기. 순서 = ① 허용 폴더 검사(내려받기와 같음) ② 임시 주소 발급 ③ 주소가 정해진 접두어인지 확인(다른 곳으로 요청이 나가지 않게)
+// ④ 크기 상한 안에서만 받기(받는 도중에도 센다) ⑤ 그림 종류는 파일 앞부분(매직 바이트)으로 판정 ⑥ 임시 주소는 응답·로그에 남기지 않는다.
+const IMG_SIG: [string, number[]][] = [['image/jpeg', [0xff, 0xd8, 0xff]], ['image/png', [0x89, 0x50, 0x4e, 0x47]], ['image/gif', [0x47, 0x49, 0x46, 0x38]]];
+function sniffImage(b: Buffer): string | null {
+  for (const [m, sig] of IMG_SIG) if (sig.every((v, i) => b[i] === v)) return m;
+  if (b.length > 12 && b.subarray(0, 4).toString('latin1') === 'RIFF' && b.subarray(8, 12).toString('latin1') === 'WEBP') return 'image/webp';
+  return null;
+}
+async function readImage(resourceId: string) {
+  const maxBytes = Math.max(1024, Math.min(Number(process.env.NL_READ_MAX_BYTES) || 3_000_000, 8_000_000));
+  const prefixes = (process.env.NL_READ_URL_PREFIXES || 'https://open-api-fs.mybox.naver.com/').split(',').map(x => x.trim()).filter(Boolean);
+  const fail = (reason: string, host?: string) => ({ isError: true, content: [{ type: 'text' as const, text: JSON.stringify(host ? { ok: false, reason, host } : { ok: false, reason }) }] });
+  const hostOf = (u: string) => { try { return new URL(u).hostname.slice(0, 80); } catch { return '?'; } };   // 진단용: 호스트 이름만 남긴다(경로·인증 값은 남기지 않음)
+  if (GUARD) await insideAllowed(resourceId, '그림 읽기 대상');
+  const meta: any = await makeRequest('GET', `/drive/resources/${resourceId}`);
+  if (typeof meta?.size === 'number' && meta.size > maxBytes) return fail('too_large: ' + meta.size + ' > ' + maxBytes);
+  const d: any = await makeRequest('GET', `/drive/files/${resourceId}/download`);
+  const url = d && typeof d.downloadUrl === 'string' ? d.downloadUrl : '';
+  if (!url || !prefixes.some(p => url.startsWith(p))) return fail('url_not_allowed', url ? hostOf(url) : undefined);
+  const ctl = new AbortController(); const timer = setTimeout(() => ctl.abort(), Math.max(200, Number(process.env.NL_READ_TIMEOUT_MS) || 20000));
+  try {
+    // 다른 곳으로 넘기는 응답(리다이렉트)은 최대 3번, 넘어간 주소도 같은 접두어 안일 때만 따라간다
+    let cur = url; let r: Response | null = null;
+    for (let hop = 0; hop < 4; hop++) {
+      r = await fetch(cur, { signal: ctl.signal, redirect: 'manual' });
+      if (r.status >= 300 && r.status < 400) {
+        const loc = r.headers.get('location'); let nx = ''; try { nx = loc ? new URL(loc, cur).toString() : ''; } catch { nx = ''; }
+        if (!nx || !prefixes.some(p => nx.startsWith(p))) return fail('redirect_not_allowed', nx ? hostOf(nx) : undefined);
+        cur = nx; r = null; continue;
+      }
+      break;
+    }
+    if (!r) return fail('too_many_redirects');
+    if (!r.ok || !r.body) return fail('download_http_' + r.status);
+    const len = Number(r.headers.get('content-length')); if (len && len > maxBytes) return fail('too_large: ' + len + ' > ' + maxBytes);
+    const chunks: Buffer[] = []; let got = 0; let over = false;
+    for await (const c of r.body as any) { got += c.length; if (got > maxBytes) { over = true; break; } chunks.push(Buffer.from(c)); }   // break가 받기를 중단시킨다(abort를 먼저 부르면 이유가 timeout으로 잘못 찍힌다)
+    if (over) return fail('too_large: >' + maxBytes);
+    const buf = Buffer.concat(chunks); const mime = sniffImage(buf);
+    if (!mime) return fail('not_image');
+    return { content: [
+      { type: 'text' as const, text: JSON.stringify({ ok: true, resourceId, name: meta?.name, bytes: buf.length, mimeType: mime }) },
+      { type: 'image' as const, data: buf.toString('base64'), mimeType: mime }] };
+  } catch (e: any) { return fail('download_failed: ' + String(e?.name === 'AbortError' ? 'timeout_or_abort' : e?.message).slice(0, 80)); }
+  finally { clearTimeout(timer); }
+}
 export const core = {
+  resource: async (resourceId: string) => { if (GUARD) { const r = rid(resourceId, '대상'); if (!allowRoots().includes(r)) await insideAllowed(r, '대상'); }
+    return makeRequest('GET', `/drive/resources/${resourceId}`); },
+  searchFiles: (args: any) => guardedSearch('/search/resources/files', args),
+  searchFolders: (args: any) => guardedSearch('/search/resources/folders', args),
   list: async (resourceId: string, params: any = {}) => { if (GUARD) await folderAllowed(resourceId, '조회 폴더');
     return makeRequest('GET', `/drive/folders/${resourceId}/resources`, undefined, pick(params, ['sort', 'count', 'cursor'])); },
   createFolder: async (args: any) => { if (GUARD) await folderAllowed(args && args.parentId, '상위 폴더');
@@ -356,6 +427,9 @@ export const core = {
     return makeRequest('POST', `/drive/resources/${resourceId}/copy`, pick(body, ['parentId', 'name', 'isOverwrite'])); },
   move: async (resourceId: string, body: any = {}) => { if (GUARD) { await insideAllowed(resourceId, '이동 원본'); await folderAllowed(body.parentId, '이동 목적지'); }
     return makeRequest('POST', `/drive/resources/${resourceId}/move`, pick(body, ['parentId', 'isOverwrite'])); },
+  download: async (resourceId: string) => { if (GUARD) await insideAllowed(resourceId, '내려받기 대상');
+    return makeRequest('GET', `/drive/files/${resourceId}/download`); },
+  readImage: async (resourceId: string) => readImage(resourceId),
   putChunk: (args: any) => putChunk(args, jobUploader),
   status: (jobId: string) => jobStatus(jobId),
 };
